@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+from torchvision.transforms import ToPILImage # used to transform input to VAE to uint image
+
 class MergeFramesWithBatch(nn.Module):
     '''
     Transforms tensor of shape (N, T, ...) to tensor of shape (N * T, ...)
@@ -22,6 +24,19 @@ class SplitFramesFromBatch(nn.Module):
     
     def forward(self, input):
         return input.reshape((-1, self.num_frames, *input.shape[1:]))
+
+class SplitChannelsFromClasses(nn.Module):
+    '''
+    Reshapes a (N, num_classes * num_channels, H, W) tensor
+    into a     (N, num_classes, num_channels, H, W) tensor
+    '''
+
+    def __init__(self, num_channels):
+        super().__init__()
+        self.num_channels = num_channels
+
+    def forward(self, input):
+        return input.reshape((input.shape[0], -1, self.num_channels, *input.shape[2:]))
 
 class Transpose(nn.Module):
     '''
@@ -210,8 +225,9 @@ class ConvDecoder(nn.Module):
             layer_list.append(nn.Upsample((img_sizes[i], img_sizes[i])))
             layer_list.append(nn.Conv2d(num_channels[i], num_channels[i+1], kernel_size=kernel_size, padding=padding))
 
-        layer_list.append(nn.Conv2d(num_channels[-1], 3, kernel_size=kernel_size, padding=padding))
-        
+        # conv to 3 * 255 channels
+        layer_list.append(nn.Conv2d(num_channels[-1], 768, kernel_size=kernel_size, padding=padding))
+        layer_list.append(SplitChannelsFromClasses(num_channels=3))
         self.deconv = nn.Sequential(*layer_list)
     
     def forward(self, z):
@@ -220,8 +236,7 @@ class ConvDecoder(nn.Module):
         '''
         out = self.linear(z)
         out = out.reshape((z.shape[0], *self.clstm_out_shape))
-        out = self.deconv(out)
-
+        return self.deconv(out)
 
 
 class CLSTMVAE(nn.Module):
@@ -230,8 +245,9 @@ class CLSTMVAE(nn.Module):
         super().__init__()
         self.encoder = CLSTMEncoder(**encoder_kwargs)
         self.decoder = ConvDecoder(**decoder_kwargs, clstm_out_shape=self.encoder.clstm_out_shape)
-        #TODO
         self.CE_loss = nn.CrossEntropyLoss(reduction='none')
+
+        self.transform = ToPILImage(mode='RGB')
 
     def sample(self, mean, log_std):
         '''
@@ -257,13 +273,13 @@ class CLSTMVAE(nn.Module):
         x_new = self.decoder(z)
         
         # convert x to classes
-        x = x.uint8()
-
+        x = (x[:,-1] * 255).type(torch.long)
+        
         # compute reconstruction loss, sum over all dimension except batch
-        L_reconstr = self.CE_loss(x, x_new).sum(dim=list(range(1,len(x.shape))))
+        L_reconstr = self.CE_loss(x_new, x).sum(dim=list(range(1,len(x.shape))))
 
         # compute elbo
-        elbo = - L_reconstr + L_regul
+        elbo =  L_reconstr + L_regul
 
         # convert into bits per dimension loss
         bpd = elbo * np.log2(np.exp(1)) / np.prod(x.shape[1:])

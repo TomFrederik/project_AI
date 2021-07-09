@@ -37,8 +37,8 @@ decoder_kwargs = {
                 'kernel_size':3
                 }
 VAE = models.CLSTMVAE(encoder_kwargs, decoder_kwargs)
-out = VAE(inp)
-print(f'Output tensor shape: {out.shape}')
+L_reconstr, L_regul, bpd = VAE(inp)
+print(f'L_reconstr = {L_reconstr},  L_regul = {L_regul}, bpd = {bpd}')
 ##############
 
 
