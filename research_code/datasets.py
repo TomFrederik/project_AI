@@ -6,9 +6,24 @@ import random
 import numpy as np
 import os
 
-def save_data(env_name, num_samples, num_frames, data_dir=None, num_workers=2, save_dir='./numpy_data'):
+ENVS = ['MineRLTreechopVectorObf-v0', 'MineRLNavigateVectorObf-v0',
+        'MineRLNavigateDenseVectorObf-v0', 'MineRLNavigateExtremeVectorObf-v0',
+        'MineRLNavigateExtremeDenseVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0',
+        'MineRLObtainDiamondDenseVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0',
+        'MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLTreechopVectorObf-v0']
+
+        
+def extract_data(env_name, num_samples, num_frames, data_dir=None, save_dir='./numpy_data'):
+    
+    # make sure data_dir exists
+    if data_dir is None:
+        data_dir = './data/'
+    
+    # make sure data_dir exists
+    os.makedirs(os.path.join(data_dir, env_name), exist_ok=True)
+    
     # get data
-    actions, pov_obs, vec_obs, rewards, next_pov_obs, next_vec_obs = get_data(env_name, num_samples, num_frames, data_dir, num_workers)
+    actions, pov_obs, vec_obs, rewards, next_pov_obs, next_vec_obs = get_data(env_name, num_samples, num_frames, data_dir)
     kwargs = {
         'actions':actions,
         'pov_obs':pov_obs,
@@ -19,22 +34,25 @@ def save_data(env_name, num_samples, num_frames, data_dir=None, num_workers=2, s
     }
 
     # make sure save directory exists
+    save_dir = os.path.join(save_dir, f'num_frames_{num_frames}')
     os.makedirs(save_dir, exist_ok=True)
 
-    # save data
-    save_path = save_dir + '/' + env_name + '_data.npz'
+    # add env identifier
+    save_path = os.path.join(save_dir, env_name + '_data.npz')
     print(f'Saving data to {save_path}..')
+    
+    # save data
     np.savez_compressed(save_path, **kwargs)
 
-def get_data(env_name, num_samples=0, num_frames=4, data_dir=None, num_workers=2):
+
+def get_data(env_name, num_samples=0, num_frames=4, data_dir=None):
     '''
     pass num_samples = 0 to load all available data
     '''
-    if data_dir is None:
-        data = minerl.data.make(env_name,  data_dir='data', num_workers=num_workers)
-    else:
-        data = minerl.data.make(env_name,  data_dir=data_dir, num_workers=num_workers)
-
+    
+    # load data
+    data = minerl.data.make(env_name,  data_dir=data_dir)
+    
     # Go over the dataset once and collect all actions and the observations (the "pov" image).
     # We do this to later on have uniform sampling of the dataset and to avoid high memory use spikes.
     all_actions = []
@@ -50,15 +68,16 @@ def get_data(env_name, num_samples=0, num_frames=4, data_dir=None, num_workers=2
 
     # Add trajectories to the data until we reach the required DATA_SAMPLES.
     for trajectory_name in trajectory_names:
+        print(trajectory_name)
         trajectory = list(data.load_data(trajectory_name, skip_interval=0, include_metadata=False))
-        for idx in range(len(trajectory) % num_frames, len(trajectory)-num_frames+1, num_frames): #TODO: Check that this works properly
+        for idx in range(len(trajectory) % num_frames, len(trajectory)-(2*num_frames)+1, num_frames): #TODO: Check that this works properly
             # extract obs, act, rew, next_obs from trajectory
             pov_obs = [trajectory[idx+i][0]['pov'] for i in range(num_frames)]
             vec_obs = [trajectory[idx+i][0]['vector'] for i in range(num_frames)]
             actions = trajectory[idx+num_frames-1][1]['vector']
             rewards = trajectory[idx+num_frames-1][2]
-            next_pov_obs = [trajectory[idx+i+num_frames-1][0]['pov'] for i in range(num_frames)]
-            next_vec_obs = [trajectory[idx+i+num_frames-1][0]['vector'] for i in range(num_frames)]
+            next_pov_obs = [trajectory[idx+i+num_frames][0]['pov'] for i in range(num_frames)]
+            next_vec_obs = [trajectory[idx+i+num_frames][0]['vector'] for i in range(num_frames)]
 
             # add to lists
             all_actions.append(actions)
