@@ -4,8 +4,7 @@ import argparse
 def main(args):
     # skip envs that are already downloaded 
     # to not having to run everything again while still debugging
-    skipenvs = ['MineRLTreechopVectorObf-v0', 'MineRLNavigateVectorObf-v0',
-        'MineRLNavigateDenseVectorObf-v0', 'MineRLNavigateExtremeVectorObf-v0',
+    skipenvs = ['MineRLNavigateExtremeVectorObf-v0',
         'MineRLNavigateExtremeDenseVectorObf-v0']
     for env in ENVS:
         if env in skipenvs:
@@ -17,7 +16,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--num_samples', default=0)
-    parser.add_argument('--num_frames', default=4)
     parser.add_argument('--data_dir')
     parser.add_argument('--save_dir')
     #parser.add_argument('--num_workers', default=2, type=int)

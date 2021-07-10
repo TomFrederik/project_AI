@@ -191,13 +191,14 @@ class CLSTMEncoder(nn.Module):
 
 class ConvDecoder(nn.Module):
 
-    def __init__(self, latent_dim, clstm_out_shape, num_channels, kernel_size):
+    def __init__(self, latent_dim, num_channels, kernel_size, clstm_out_shape):
         '''
         Args:
             latent_dim - dimension of the latent space
-            clstm_out_shape - shape of an image after it is passed through the encoding CLSTM, should be of form (C, H, W)
             num_channels - list of ints describing the number of channels after each convolution. 
                            len(num_channels) is used to determine number of layers.
+            kernel_size - int, size of the kernels used in the convolutions
+            clstm_out_shape - shape of an image after it is passed through the encoding CLSTM, should be of form (C, H, W)
         '''
         super().__init__()
         # MAYBE?
@@ -256,6 +257,20 @@ class CLSTMVAE(nn.Module):
         z = mean + torch.exp(log_std) * torch.normal(torch.zeros_like(mean), torch.ones_like(log_std))
         return z
     
+    def reconstruct_only(self, x):
+        '''
+        Encodes x, samples z and reconstructs x
+        '''
+        with torch.no_grad():
+            # encode
+            mean, log_std = self.encoder(x)
+
+            # sample latent vector
+            z = self.sample(mean, log_std)
+
+            # decode
+            return self.decoder(z)
+        
     def forward(self, x):
         '''
         x - input, for mineRL (B, T, C, H, W) batch of stack of frames
