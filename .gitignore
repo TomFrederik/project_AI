@@ -132,3 +132,7 @@ dmypy.json
 
 # Job scripts for SLURM
 job_scripts/
+run_logs/
+research_jobs/lightning_logs/
+research_jobs/VAE_epoch_*
+trained_models/

@@ -87,7 +87,7 @@ def get_data(env_name, num_samples=0, data_dir=None):
 
 class OfflineData(Dataset):
 
-    def __init__(self, env_name, num_samples, data_dir, num_frames=4):
+    def __init__(self, env_name, data_dir, num_frames=4):
 
         super().__init__()
 
@@ -95,16 +95,39 @@ class OfflineData(Dataset):
 
         # load data
         data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        self.actions, self.pov_obs, self.vec_obs, self.rewards, self.traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts'] 
+        actions, pov_obs, vec_obs, rewards, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts'] 
 
         #TODO do frame extraction
+        self.num_frames = num_frames
+
+        new_actions = []
+        new_pov_obs = []
+        new_vec_obs = []
+        new_rewards = []
+
+        # traverse backwards through trajectories
+        for i in range(len(traj_starts)-1-2*num_frames, 0, -num_frames):
+            # skip if we would cross episodes
+            if 1 in traj_starts[i:i+2*num_frames]:
+                # TODO: DO NOT SKIP LAST FRAMES IN EARLIER EPISODE
+                continue
+            new_actions.append(actions[i:i+num_frames]) # TODO: IS THIS CORRECT INDEXING?
+            new_pov_obs.append(pov_obs[i:i+2*num_frames])
+            new_vec_obs.append(vec_obs[i:i+2*num_frames])
+            new_rewards.append(rewards[i:i+num_frames])
+
+        self.actions = np.array(new_actions)
+        self.pov_obs = np.array(new_pov_obs)
+        self.vec_obs = np.array(new_vec_obs)
+        self.rewards = np.array(new_rewards)
+
 
     def __len__(self):
         return len(self.actions)
     
     def __getitem__(self, idx):
         # transform image to float array
-        pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.pov_obs[idx]], dim=0).squeeze()
-        next_pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.next_pov_obs[idx]], dim=0).squeeze()
+        pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.pov_obs[idx,:self.num_frames]], dim=0).squeeze()
+        next_pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.pov_obs[idx,self.num_frames:]], dim=0).squeeze()
 
-        return self.actions[idx].astype(np.int64), pov, self.vec_obs[idx], self.rewards[idx], next_pov, self.next_vec_obs[idx]
+        return self.actions[idx].astype(np.int64), pov, self.vec_obs[idx,:self.num_frames], self.rewards[idx], next_pov, self.vec_obs[idx,self.num_frames:]
