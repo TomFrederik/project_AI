@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "train_DynamicsModel.py", line 2, in <module>
+    import datasets
+  File "/home/lieberum/minerl/research_code/datasets.py", line 255
+    def _data_generator(self):
+    ^
+IndentationError: expected an indented block
+srun: error: r32n6: task 0: Exited with exit code 1

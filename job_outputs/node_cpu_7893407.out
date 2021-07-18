@@ -1,0 +1,37 @@
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Saving logs and model to /home/lieberum/minerl/run_logs/DynamicsModel/MineRLObtainIronPickaxeVectorObf-v0
+Encoder img_shapes: [(64, 64), (31, 31), (15, 15), (7, 7), (3, 3)]
+
+Image sizes for deconv: [(3, 3), (7, 7), (15, 15), (31, 31), (64, 64)]
+
+Loading data of MineRLObtainIronPickaxeVectorObf-v0 from /home/lieberum/minerl/data/numpy_data..
+
+num train samples = 343849 --> 171925 train batches
+num val samples = 38205
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py:556: UserWarning: You requested distributed training on GPUs, but none is available, so we set backend to `ddp_cpu`.
+  rank_zero_warn(
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py:563: UserWarning: You are running on single node with no parallelization, so distributed has no effect.
+  rank_zero_warn('You are running on single node with no parallelization, so distributed has no effect.')
+GPU available: False, used: False
+TPU available: False, using: 0 TPU cores
+Set SLURM handle signals.
+
+  | Name       | Type                 | Params
+----------------------------------------------------
+0 | VAE        | ConvVAE              | 2.5 M 
+1 | base_model | DynamicsBaseModel    | 788 K 
+2 | criterion  | MSELoss              | 0     
+3 | merge      | MergeFramesWithBatch | 0     
+4 | split      | SplitFramesFromBatch | 0     
+----------------------------------------------------
+3.3 M     Trainable params
+0         Non-trainable params
+3.3 M     Total params
+13.057    Total estimated model params size (MB)
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/nn/functional.py:718: UserWarning: Named tensors and all their associated APIs are an experimental feature and subject to change. Please do not use them for anything important until they are released as stable. (Triggered internally at  /opt/conda/conda-bld/pytorch_1623448278899/work/c10/core/TensorImpl.h:1156.)
+  return torch.max_pool2d(input, kernel_size, stride, padding, dilation, ceil_mode)
+Validation sanity check: 0it [00:00, ?it/s]Validation sanity check:   0%|          | 0/2 [00:00<?, ?it/s]                                                              Training: 0it [00:00, ?it/s]Training:   0%|          | 0/191028 [00:00<?, ?it/s]Epoch 0:   0%|          | 0/191028 [00:00<?, ?it/s] Epoch 0:   0%|          | 100/191028 [07:49<248:51:53,  4.69s/it]Epoch 0:   0%|          | 100/191028 [07:49<248:51:54,  4.69s/it, loss=0.104, v_num=7893407]Epoch 0:   0%|          | 200/191028 [15:19<243:37:46,  4.60s/it, loss=0.104, v_num=7893407]Epoch 0:   0%|          | 200/191028 [15:19<243:37:46,  4.60s/it, loss=0.135, v_num=7893407]Epoch 0:   0%|          | 300/191028 [20:46<220:02:50,  4.15s/it, loss=0.135, v_num=7893407]Epoch 0:   0%|          | 300/191028 [20:46<220:02:50,  4.15s/it, loss=0.0602, v_num=7893407]Epoch 0:   0%|          | 400/191028 [24:23<193:47:16,  3.66s/it, loss=0.0602, v_num=7893407]Epoch 0:   0%|          | 400/191028 [24:23<193:47:16,  3.66s/it, loss=0.0684, v_num=7893407]Epoch 0:   0%|          | 500/191028 [27:00<171:34:09,  3.24s/it, loss=0.0684, v_num=7893407]Epoch 0:   0%|          | 500/191028 [27:00<171:34:09,  3.24s/it, loss=0.127, v_num=7893407] Epoch 0:   0%|          | 600/191028 [29:31<156:10:48,  2.95s/it, loss=0.127, v_num=7893407]Epoch 0:   0%|          | 600/191028 [29:31<156:10:48,  2.95s/it, loss=0.137, v_num=7893407]Epoch 0:   0%|          | 700/191028 [31:19<141:55:07,  2.68s/it, loss=0.137, v_num=7893407]Epoch 0:   0%|          | 700/191028 [31:19<141:55:08,  2.68s/it, loss=0.153, v_num=7893407]Epoch 0:   0%|          | 800/191028 [33:08<131:19:26,  2.49s/it, loss=0.153, v_num=7893407]Epoch 0:   0%|          | 800/191028 [33:08<131:19:26,  2.49s/it, loss=0.112, v_num=7893407]Epoch 0:   0%|          | 900/191028 [35:07<123:40:50,  2.34s/it, loss=0.112, v_num=7893407]Epoch 0:   0%|          | 900/191028 [35:07<123:40:50,  2.34s/it, loss=0.0752, v_num=7893407]Epoch 0:   1%|          | 1000/191028 [37:01<117:16:01,  2.22s/it, loss=0.0752, v_num=78srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd: error: *** JOB 7893407 ON r10n27 CANCELLED AT 2021-07-17T18:10:34 ***
+slurmstepd: error: *** STEP 7893407.0 ON r10n27 CANCELLED AT 2021-07-17T18:10:34 ***
+bypassing sigterm

@@ -1,0 +1,36 @@
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Saving logs and model to /home/lieberum/minerl/run_logs/DynamicsModel/MineRLObtainIronPickaxeVectorObf-v0
+Encoder img_shapes: [(64, 64), (31, 31), (15, 15), (7, 7), (3, 3)]
+
+Image sizes for deconv: [(3, 3), (7, 7), (15, 15), (31, 31), (64, 64)]
+
+Loading data of MineRLObtainIronPickaxeVectorObf-v0 from /home/lieberum/minerl/data/numpy_data..
+
+num train samples = 343849 --> 171925 train batches
+num val samples = 38205
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py:556: UserWarning: You requested distributed training on GPUs, but none is available, so we set backend to `ddp_cpu`.
+  rank_zero_warn(
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py:563: UserWarning: You are running on single node with no parallelization, so distributed has no effect.
+  rank_zero_warn('You are running on single node with no parallelization, so distributed has no effect.')
+GPU available: False, used: False
+TPU available: False, using: 0 TPU cores
+Traceback (most recent call last):
+  File "train_DynamicsModel.py", line 86, in <module>
+    train_DynamicsModel(**args)
+  File "train_DynamicsModel.py", line 56, in train_DynamicsModel
+    trainer=pl.Trainer(
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/env_vars_connector.py", line 40, in insert_env_defaults
+    return fn(self, **kwargs)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 321, in __init__
+    self.accelerator_connector = AcceleratorConnector(
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py", line 138, in __init__
+    self.accelerator = self.select_accelerator()
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py", line 489, in select_accelerator
+    precision_plugin=self.precision_plugin,
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py", line 222, in precision_plugin
+    self._precision_plugin = self.select_precision_plugin()
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py", line 352, in select_precision_plugin
+    raise MisconfigurationException(
+pytorch_lightning.utilities.exceptions.MisconfigurationException: You have asked for native AMP on CPU, but AMP is only available on GPU.
+srun: error: r25n7: task 0: Exited with exit code 1

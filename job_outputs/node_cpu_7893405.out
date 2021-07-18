@@ -1,0 +1,86 @@
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Saving logs and model to /home/lieberum/minerl/run_logs/DynamicsModel/MineRLObtainIronPickaxeVectorObf-v0
+Encoder img_shapes: [(64, 64), (31, 31), (15, 15), (7, 7), (3, 3)]
+
+Image sizes for deconv: [(3, 3), (7, 7), (15, 15), (31, 31), (64, 64)]
+
+Loading data of MineRLObtainIronPickaxeVectorObf-v0 from /home/lieberum/minerl/data/numpy_data..
+
+num train samples = 343849 --> 171925 train batches
+num val samples = 38205
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py:556: UserWarning: You requested distributed training on GPUs, but none is available, so we set backend to `ddp_cpu`.
+  rank_zero_warn(
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/accelerator_connector.py:563: UserWarning: You are running on single node with no parallelization, so distributed has no effect.
+  rank_zero_warn('You are running on single node with no parallelization, so distributed has no effect.')
+GPU available: False, used: False
+TPU available: False, using: 0 TPU cores
+Set SLURM handle signals.
+
+  | Name       | Type                 | Params
+----------------------------------------------------
+0 | VAE        | ConvVAE              | 2.5 M 
+1 | base_model | DynamicsBaseModel    | 788 K 
+2 | criterion  | MSELoss              | 0     
+3 | merge      | MergeFramesWithBatch | 0     
+4 | split      | SplitFramesFromBatch | 0     
+----------------------------------------------------
+3.3 M     Trainable params
+0         Non-trainable params
+3.3 M     Total params
+13.057    Total estimated model params size (MB)
+Validation sanity check: 0it [00:00, ?it/s]Validation sanity check:   0%|          | 0/2 [00:00<?, ?it/s]pov: torch.Size([2, 4, 3, 64, 64])
+pov: torch.Size([8, 3, 64, 64])
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/nn/functional.py:718: UserWarning: Named tensors and all their associated APIs are an experimental feature and subject to change. Please do not use them for anything important until they are released as stable. (Triggered internally at  /opt/conda/conda-bld/pytorch_1623448278899/work/c10/core/TensorImpl.h:1156.)
+  return torch.max_pool2d(input, kernel_size, stride, padding, dilation, ceil_mode)
+pov: torch.Size([8, 128])
+pov: torch.Size([2, 4, 128])
+obs: torch.Size([2, 4, 192])
+input obs: torch.Size([2, 192])
+target obs: torch.Size([2, 3, 192])
+model input: torch.Size([2, 256])
+pred obs: torch.Size([4, 2, 192])
+pred obs: torch.Size([2, 4, 192])
+/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/nn/modules/loss.py:528: UserWarning: Using a target size (torch.Size([2, 3, 192])) that is different to the input size (torch.Size([2, 4, 192])). This will likely lead to incorrect results due to broadcasting. Please ensure they have the same size.
+  return F.mse_loss(input, target, reduction=self.reduction)
+Traceback (most recent call last):
+  File "train_DynamicsModel.py", line 86, in <module>
+    train_DynamicsModel(**args)
+  File "train_DynamicsModel.py", line 66, in train_DynamicsModel
+    trainer.fit(model, train_loader, val_loader)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 460, in fit
+    self._run(model)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 758, in _run
+    self.dispatch()
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 799, in dispatch
+    self.accelerator.start_training(self)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/accelerators/accelerator.py", line 96, in start_training
+    self.training_type_plugin.start_training(trainer)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/plugins/training_type/training_type_plugin.py", line 144, in start_training
+    self._results = trainer.run_stage()
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 809, in run_stage
+    return self.run_train()
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 844, in run_train
+    self.run_sanity_check(self.lightning_module)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 1112, in run_sanity_check
+    self.run_evaluation()
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 967, in run_evaluation
+    output = self.evaluation_loop.evaluation_step(batch, batch_idx, dataloader_idx)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/trainer/evaluation_loop.py", line 174, in evaluation_step
+    output = self.trainer.accelerator.validation_step(args)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/accelerators/accelerator.py", line 226, in validation_step
+    return self.training_type_plugin.validation_step(*args)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/pytorch_lightning/plugins/training_type/training_type_plugin.py", line 161, in validation_step
+    return self.lightning_module.validation_step(*args, **kwargs)
+  File "/home/lieberum/minerl/research_code/models.py", line 95, in validation_step
+    loss = self.criterion(pred_obs, target_obs)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1051, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/nn/modules/loss.py", line 528, in forward
+    return F.mse_loss(input, target, reduction=self.reduction)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/nn/functional.py", line 3089, in mse_loss
+    expanded_input, expanded_target = torch.broadcast_tensors(input, target)
+  File "/home/lieberum/.conda/envs/minerl/lib/python3.8/site-packages/torch/functional.py", line 73, in broadcast_tensors
+    return _VF.broadcast_tensors(tensors)  # type: ignore[attr-defined]
+RuntimeError: The size of tensor a (4) must match the size of tensor b (3) at non-singleton dimension 1
+                                                              srun: error: r25n7: task 0: Exited with exit code 1

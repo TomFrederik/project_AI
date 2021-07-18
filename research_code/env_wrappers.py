@@ -5,8 +5,9 @@ class ClusteredActions(gym.Wrapper):
         ''' 
         Basically copied from MineRL Research Track BC baseline.
         Wrapper around an action space, that remaps a discrete action to the corresponding centroid.
+        The wrapped environment accepts a positive integer action and maps it to the corresponding centroid.
         Args:
-            env - gym environment
+            env - gym environment instance
             action_centroids - centroids returned by KMeans on action data
         '''
         super().__init__(env)
@@ -14,6 +15,10 @@ class ClusteredActions(gym.Wrapper):
         # save centroids
         self.action_centroids = action_centroids
         
+        # get num centroids
+        self.n_clusters = len(self.action_centroids)
+        print(f'Wrapping environment to use {self.n_clusters} discrete actions instead..')
+
         # save env
         self.base_env = env
 
