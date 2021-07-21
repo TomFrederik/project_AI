@@ -169,7 +169,7 @@ class DynamicsData(Dataset):
                         break
                 continue
             
-            new_actions.append(actions[cur_frame])
+            new_actions.append(actions[cur_frame:cur_frame+num_frames])
             new_pov_obs.append(pov_obs[cur_frame:cur_frame+num_frames])
             new_vec_obs.append(vec_obs[cur_frame:cur_frame+num_frames])
             #new_rewards.append(rewards[cur_frame:cur_frame+num_frames])
@@ -222,16 +222,6 @@ class BehavCloneData(Dataset):
         return pov, self.vec_obs[idx].astype(np.float32), act
 
 
-def init_datapipline(env_name, data_dir, num_workers, batch_size, seq_len, num_epochs, random_seed=42):
-    '''
-    Inits and returns a generator to sample batches of length seq_len from the given environment
-    WARNING: If an element of a batch reaches the end of its episode, it will be appended with a new episode.
-    '''
-    pipeline = minerl.data.make(env_name, data_dir, num_workers, random_seed=random_seed)
-    return minerl.data.BufferedBatchIter(pipeline, batch_size, seq_len, num_epochs, seed=random_seed)
-
-
-
 class TrajData(Dataset):
 
     def __init__(self, env_name, data_dir, num_workers, num_frames):
@@ -246,7 +236,7 @@ class TrajData(Dataset):
 
     def __len__(self):
         pass
-
+    '''
     def __getitem__(self, idx):
         sar = self.cur_traj[self.pointer:self.pointer+self.num_frames]
         pov = sar[0]['pov']
@@ -264,4 +254,4 @@ class TrajData(Dataset):
         for name in self.traj_names:
             traj_data = self.data.load_data(name, skip_interval=0, include_metadata=False)
             yield traj_data
-
+    '''

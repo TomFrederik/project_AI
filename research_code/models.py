@@ -3,8 +3,137 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
 import torchdiffeq as teq
+import utils
 
 from torchvision.transforms import ToPILImage # used to transform input to VAE to uint image
+
+
+class MDNLSTMDynamicsModel(pl.LightningModule):
+    def __init__(self, lstm_kwargs, latent_dim, VAE_path, optim_kwargs, scheduler_kwargs, seq_len):
+        super().__init__()
+        
+        # save params
+        self.save_hyperparameters()
+    
+        # load VAE
+        self.VAE = ConvVAE.load_from_checkpoint(VAE_path)
+        self.VAE.eval()
+
+        # save some vars
+        self.scheduler_kwargs = scheduler_kwargs
+        self.optim_kwargs = optim_kwargs
+        self.seq_len = seq_len
+        self.mse_loss = nn.MSELoss()
+        self.merge = MergeFramesWithBatch()
+        self.split = SplitFramesFromBatch(self.seq_len)
+        self.split_pred = SplitFramesFromBatch(self.seq_len-1)
+        self.lstm = nn.LSTM(**lstm_kwargs, batch_first=True)
+        # we KNOW that the latent space follows a multi-variate, diagonal covariance, Gaussian,
+        # so we will only need a single (multi-dimensional) component to model the encoding
+        # The obfuscated vector could be multimodal, but we assume for now that it isn't
+        self.mdn_network = nn.Sequential(nn.Linear(lstm_kwargs['hidden_size'], 2*(latent_dim+64)))
+        self.elu = nn.ELU()    
+    
+    def forward(self, model_input):
+        lstm_out, _ = self.lstm(model_input)
+        lstm_out = lstm_out[:,:-1] # skip last element, since we can't score it against a target
+        mdn_in = self.merge(lstm_out) # merge frames with batch
+        mean, preact_std = torch.chunk(self.mdn_network(mdn_in), chunks=2, dim=1)
+        std = self.elu(preact_std) + 1 # make sure std is non-negative
+
+        # compute log prob of last frames under computed Gaussian
+        merged_input = self.merge(model_input[:,1:,:-64]) # don't want to predict actions, just observation
+        log_prob = self._get_log_p(merged_input, mean, std)
+        log_prob = self.split_pred(log_prob) # split again
+        
+        # sample from the multi-dim gaussian parameterized by the mdn outputs --> only used to compare with NeuralODE
+        pred_z = mean + std * torch.normal(torch.zeros_like(mean), torch.ones_like(std))
+        pred_z = self.split_pred(pred_z)
+        return log_prob, pred_z
+
+    def _get_log_p(self, x, mean, std):
+        '''
+        Computes log prob of a x under a diagonal multivariate gaussian
+        Shapes:
+        x - (B*T, D)
+        mu - (B*T, D)
+        std - (B*T, D)
+        '''
+        D = x.shape[1]
+        return -0.5 * D * np.log(2*np.pi) - torch.sum(2 * torch.log(std) + (x - mean).abs().pow(2) / (2 * std.abs().pow(2)), dim=1)
+
+    def _step(self, batch):
+        '''
+        Helper function which encodes the pov obs, cats them with vec obs and action to pass through self.forward
+        returns prediction and target
+        '''
+        # get data
+        pov, vec, actions = batch
+        pov = self.merge(pov) # merge frames with batch for batch processing by VAE
+        pov = self.VAE.encode_only(pov)
+        pov = self.split(pov) # split frames from batch again
+        obs = torch.cat([pov, vec], dim=2)
+        target_obs = obs[:,1:,:]
+        model_input = torch.cat([obs, actions], dim=2)
+        # create predictions
+        log_p, pred_z = self(model_input)
+        return log_p, pred_z, target_obs
+    
+    def training_step(self, batch, batch_idx):
+        log_p, pred_obs, target_obs = self._step(batch)
+        # score and log predictions
+        mse_loss = self.mse_loss(pred_obs, target_obs)
+        nll_loss = -1 * log_p.mean()
+        self.log('Training/nll_loss', nll_loss, on_step=True)
+        self.log('Training/mse_loss', mse_loss, on_step=True)
+        return nll_loss
+        
+    def validation_step(self, batch, batch_idx):
+        log_p, pred_obs, target_obs = self._step(batch)
+        # score and log predictions
+        mse_loss = self.mse_loss(pred_obs, target_obs)
+        nll_loss = -1 * log_p.mean()
+        self.log('Validation/nll_loss', nll_loss, on_step=False, on_epoch=True)
+        self.log('Validation/mse_loss', mse_loss, on_step=False, on_epoch=True)
+        return nll_loss
+        
+    def configure_optimizers(self):
+        # set up optimizer
+        optimizer = torch.optim.Adam(self.parameters(), **self.optim_kwargs)
+        # set up scheduler
+        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.scheduler_kwargs['lr_gamma'])
+        lr_dict = {
+            'scheduler': lr_scheduler,
+            'interval': self.scheduler_kwargs['lr_step_mode'],
+            'frequency': self.scheduler_kwargs['lr_decrease_freq'],
+        }
+        return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
+
+    @torch.no_grad()
+    def predict_recursively(self, input):
+        '''
+        Auto-regressively applies dynamics model to extrapolate from image
+        Input shape should be (B, D), i.e. have no time component yet
+        '''
+        #TODO make it so that it can take new actions intead of repeating action
+        out = input[:,None,:]
+        action = out[:,:,-64:]
+        for t in range(self.seq_len):
+            # predict new frame / latent space
+            lstm_out, _ = self.lstm(out)
+            mdn_in = lstm_out[:,-1,:] # only take last output
+            mean, preact_std = torch.chunk(self.mdn_network(mdn_in), chunks=2, dim=1)
+            std = self.elu(preact_std) + 1 # make sure std is non-negative
+
+            # sample from the multi-dim gaussian parameterized by the mdn outputs --> only used to compare with NeuralODE
+            pred_z = mean + std * torch.normal(torch.zeros_like(mean), torch.ones_like(std))
+            pred_z = pred_z.reshape((pred_z.shape[0],1,pred_z.shape[1]))
+            pred_z = torch.cat([pred_z, action], dim=2) # repeat action, #TODO: make it so that action can be given as input?
+            
+            out = torch.cat([out, pred_z], dim=1) # add new frame to sequence
+        
+        return out[:,:,:-128] # return generated sequence, but only z part, i.e. not vec obs and vec act.
+
 
 class DynamicsBaseModel(nn.Module):
 
@@ -27,7 +156,7 @@ class DynamicsBaseModel(nn.Module):
         return self.net(model_input)
 
 class NODEDynamicsModel(pl.LightningModule):
-    def __init__(self, base_model_class, base_model_kwargs, VAE_path, optim_kwargs, scheduler_kwargs, num_frames):
+    def __init__(self, base_model_class, base_model_kwargs, VAE_path, optim_kwargs, scheduler_kwargs, seq_len):
         super().__init__()
         
         # save params
@@ -40,19 +169,19 @@ class NODEDynamicsModel(pl.LightningModule):
         # save some vars
         self.scheduler_kwargs = scheduler_kwargs
         self.optim_kwargs = optim_kwargs
-        self.num_frames = num_frames
+        self.seq_len = seq_len
         self.base_model = base_model_class(**base_model_kwargs)
         self.criterion = nn.MSELoss()
         self.timesteps = None
         self.merge = MergeFramesWithBatch()
-        self.split = SplitFramesFromBatch(self.num_frames)
+        self.split = SplitFramesFromBatch(self.seq_len)
         
     
     def forward(self, model_input):
         if self.timesteps is None:
-            self.timesteps = torch.linspace(0,self.num_frames,self.num_frames, device=self.device)
+            self.timesteps = torch.linspace(0,self.seq_len,self.seq_len, device=self.device)
         # pass through ode solver
-        pred_y = teq.odeint_adjoint(self.base_model, model_input, self.timesteps)
+        pred_y = teq.odeint_adjoint(self.base_model, model_input, self.timesteps, adjoint_options={"norm": "seminorm"})
         return pred_y
 
     def _step(self, batch):
@@ -66,10 +195,10 @@ class NODEDynamicsModel(pl.LightningModule):
         pov = self.split(pov) # split frames from batch again
         obs = torch.cat([pov, vec], dim=2)
         input_obs, target_obs = obs[:,0,:], obs[:,1:,:] # split into input and target
-        model_input = torch.cat([input_obs, actions], dim=1)
+        model_input = torch.cat([input_obs, actions[:,0,:]], dim=1)
         # create predictions
         pred_obs = self(model_input)[:,:,:obs.shape[2]] # throw away the predicted trajectories of actions
-        pred_obs = pred_obs[1:,:,:].transpose(0,1) # flip to batch first, and throw away initial value
+        pred_obs = pred_obs[1:,:,:].transpose(0,1) # flip to batch first, and throw away initial value, since it didn't change
         return pred_obs, target_obs
     
     def training_step(self, batch, batch_idx):
@@ -545,6 +674,16 @@ class VAE(pl.LightningModule):
 
         return latent
 
+    @torch.no_grad()
+    def decode_only(self, z):
+        # decode
+        probs = torch.nn.functional.softmax(self.decoder(z), dim=1)
+
+        # sample from the 255-category distribution
+        sampled_x = torch.multinomial(probs.transpose(0,1).flatten(start_dim=1).transpose(0,1), 1).squeeze().reshape((-1, 3, 64, 64))
+        
+        return sampled_x.float() / 255
+    
     def forward(self, x):
         '''
         x - input, for mineRL (B, C, H, W) batch of frames

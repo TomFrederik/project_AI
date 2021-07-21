@@ -17,8 +17,12 @@ import argparse
 # for debugging
 torch.autograd.set_detect_anomaly(True)
 
+STR_TO_MODEL = {
+    'mdn':models.MDNLSTMDynamicsModel,
+    'node':models.NODEDynamicsModel
+}
 
-def train_DynamicsModel(env_name, data_dir, lr, val_perc, eval_freq, batch_size, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path):
+def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_perc, eval_freq, batch_size, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{env_name}'
@@ -27,16 +31,43 @@ def train_DynamicsModel(env_name, data_dir, lr, val_perc, eval_freq, batch_size,
     print(f'Saving logs and model to {log_dir}')
 
     ## some model kwargs
-    seq_len = 4
-    hidden_dims = [512,512,512]
-    base_model_class = models.DynamicsBaseModel
-    base_model_kwargs = {'input_dim':256, 'hidden_dims':hidden_dims}
+    optim_kwargs = {'lr':lr}
+    scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
+    
+    if dynamics_model == 'node':
+        seq_len = seq_len
+        hidden_dims = [512,512,512]
+        base_model_class = models.DynamicsBaseModel
+        base_model_kwargs = {'input_dim':256, 'hidden_dims':hidden_dims}
+        
+        model_kwargs = {
+            'base_model_class':base_model_class, 
+            'base_model_kwargs':base_model_kwargs, 
+            'seq_len':seq_len, 
+            'VAE_path':model_path,
+            'optim_kwargs':optim_kwargs,
+            'scheduler_kwargs':scheduler_kwargs
+        }
+        monitor = 'Validation/loss'
+    elif dynamics_model == 'mdn':
+        seq_len = seq_len
+        latent_dim = 128
+        lstm_kwargs = {'input_size':256, 'num_layers':1, 'hidden_size':1024}
+        model_kwargs = {
+            'lstm_kwargs':lstm_kwargs, 
+            'seq_len':seq_len, 
+            'latent_dim':latent_dim,
+            'VAE_path':model_path,
+            'optim_kwargs':optim_kwargs,
+            'scheduler_kwargs':scheduler_kwargs
+        }
+        monitor = 'Validation/nll_loss'
+    else:
+        ValueError(f"Unrecognized model {dynamics_model}")
     ##
 
     # init model
-    optim_kwargs = {'lr':lr}
-    scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
-    model = models.NODEDynamicsModel(base_model_class, base_model_kwargs, model_path, optim_kwargs, scheduler_kwargs, seq_len)
+    model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
     data = datasets.DynamicsData(env_name, data_dir, seq_len)
@@ -52,11 +83,11 @@ def train_DynamicsModel(env_name, data_dir, lr, val_perc, eval_freq, batch_size,
     print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
     print(f'num val samples = {len(val_data)}')
 
-
+    model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor=monitor, save_last=True)
     trainer=pl.Trainer(
                     precision=32, #32 is normal, 16 is mixed precision
                     progress_bar_refresh_rate=100, #every N batches update progress bar
-                    checkpoint_callback=ModelCheckpoint(save_weights_only=True, mode="min", monitor="Validation/loss"),
+                    callbacks=[model_checkpoint],
                     gpus=torch.cuda.device_count(),
                     accelerator='dp', #anything else here seems to lead to crashes/errors
                     default_root_dir=log_dir,
@@ -72,6 +103,7 @@ if __name__=='__main__':
     parser.add_argument('--data_dir')
     parser.add_argument('--log_dir')
     parser.add_argument('--env_name')
+    parser.add_argument('--dynamics_model', default='mdn', choices=['mdn', 'node'], help='Model used to predict the next latent state')
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
