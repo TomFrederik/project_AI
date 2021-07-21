@@ -137,3 +137,4 @@ research_jobs/lightning_logs/
 research_jobs/VAE_epoch_*
 trained_models/
 dynamics_imgs/
+*.pem
