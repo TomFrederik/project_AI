@@ -104,6 +104,7 @@ if __name__=='__main__':
     parser.add_argument('--log_dir')
     parser.add_argument('--env_name')
     parser.add_argument('--dynamics_model', default='mdn', choices=['mdn', 'node'], help='Model used to predict the next latent state')
+    parser.add_argument('--seq_len', default=4, type=int)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')

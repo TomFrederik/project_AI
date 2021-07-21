@@ -7,9 +7,7 @@ import numpy as np
 import os
 import random
 
-ENVS = ['MineRLTreechopVectorObf-v0', 'MineRLNavigateVectorObf-v0',
-        'MineRLNavigateDenseVectorObf-v0', 'MineRLNavigateExtremeVectorObf-v0',
-        'MineRLNavigateExtremeDenseVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0',
+ENVS = ['MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0',
         'MineRLObtainDiamondDenseVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0',
         'MineRLObtainIronPickaxeDenseVectorObf-v0']
 
