@@ -84,18 +84,18 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     for i in range(len(following_povs)):
         images.append(np.concatenate(((following_povs[i].to('cpu').transpose(1,2).numpy()*255).astype(np.uint8), (model_output[i+1].transpose(1,2).to('cpu').numpy()*255).astype(np.uint8)), axis=1).transpose(2,1,0))
      
-    size = images[0].shape[1:]
+    size = images[0].transpose(1,0,2).shape[:-1]
 
 
-    #out = cv2.VideoWriter(os.path.join(save_path,'dynamics_imgs',f'{model_class}_dynamics.mp4'),cv2.VideoWriter_fourcc(*'mp4v'), 25, size, isColor=True)
- 
+    out = cv2.VideoWriter(os.path.join(save_path,'dynamics_imgs',f'{model_class}_dynamics.mp4'),cv2.VideoWriter_fourcc(*'mp4v'), 25, size)
+
     for i in range(len(images)):
         plt.figure()
         plt.imshow(images[i])
         plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_{i}.png'))
         plt.close()
-    #    out.write(images[i])
-    #out.release()
+        out.write(images[i])
+    out.release()
 
 
 

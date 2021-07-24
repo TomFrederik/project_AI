@@ -7,9 +7,8 @@ import numpy as np
 import os
 import random
 
-ENVS = ['MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0',
-        'MineRLObtainDiamondDenseVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0',
-        'MineRLObtainIronPickaxeDenseVectorObf-v0']
+ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
+        'MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0']
 
         
 def extract_data(env_name, num_samples, data_dir=None, save_dir='./numpy_data'):
@@ -18,6 +17,8 @@ def extract_data(env_name, num_samples, data_dir=None, save_dir='./numpy_data'):
     if data_dir is None:
         data_dir = './data/'
     
+    print('Data dir in extract data is ', data_dir)
+
     # make sure data_dir exists
     os.makedirs(os.path.join(data_dir, env_name), exist_ok=True)
     
@@ -84,9 +85,9 @@ def get_data(env_name, num_samples=0, data_dir=None):
 
     return all_actions, all_pov_obs, all_vec_obs, all_rewards, all_traj_starts
 
-class OfflineData(Dataset):
+class VAEData(Dataset):
 
-    def __init__(self, env_name, data_dir, num_frames=4):
+    def __init__(self, env_name, data_dir, num_data=0):
 
         super().__init__()
 
@@ -96,28 +97,16 @@ class OfflineData(Dataset):
         data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
         actions, pov_obs, vec_obs, rewards, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts'] 
 
-        self.num_frames = num_frames
+        if num_data > 0:
+            actions = actions[:num_data]
+            pov_obs = pov_obs[:num_data]
+            vec_obs = vec_obs[:num_data]
+            rewards = rewards[:num_data]
 
-        new_actions = []
-        new_pov_obs = []
-        new_vec_obs = []
-        new_rewards = []
-
-        # traverse backwards through trajectories
-        for i in range(len(traj_starts)-1-num_frames, 0, -num_frames):
-            # skip if we would cross episodes
-            if 1 in traj_starts[i:i+num_frames]:
-                # TODO: DO NOT SKIP LAST FRAMES IN EARLIER EPISODE
-                continue
-            new_actions.append(actions[i:i+num_frames]) # TODO: IS THIS CORRECT INDEXING? CHANGED NOW --> TEST AT SOME POINT IN VAE
-            new_pov_obs.append(pov_obs[i:i+num_frames])
-            new_vec_obs.append(vec_obs[i:i+num_frames])
-            new_rewards.append(rewards[i:i+num_frames])
-
-        self.actions = np.array(new_actions)
-        self.pov_obs = np.array(new_pov_obs)
-        self.vec_obs = np.array(new_vec_obs)
-        self.rewards = np.array(new_rewards)
+        self.actions = np.array(actions)
+        self.pov_obs = np.array(pov_obs)
+        self.vec_obs = np.array(vec_obs)
+        self.rewards = np.array(rewards)
 
 
     def __len__(self):
@@ -125,15 +114,14 @@ class OfflineData(Dataset):
     
     def __getitem__(self, idx):
         # transform image to float array
-        pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.pov_obs[idx,:self.num_frames]], dim=0).squeeze()
-        next_pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.pov_obs[idx,self.num_frames:]], dim=0).squeeze()
+        pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
 
-        return self.actions[idx].astype(np.int64), pov, self.vec_obs[idx,:self.num_frames], self.rewards[idx], next_pov, self.vec_obs[idx,self.num_frames:]
+        return self.actions[idx].astype(np.int64), pov, self.vec_obs[idx], self.rewards[idx]
 
 
 class DynamicsData(Dataset):
 
-    def __init__(self, env_name, data_dir, seq_len=4):
+    def __init__(self, env_name, data_dir, seq_len=4, num_data=0):
         '''
         Will load seq_len sequences, first for input, rest as target
         longer seq len doesn't make sense since it would need to know the actions at each timestept too
@@ -151,9 +139,10 @@ class DynamicsData(Dataset):
         new_actions = []
         new_pov_obs = []
         new_vec_obs = []
-        #new_rewards = []
+        new_rewards = []
 
         # traverse backwards through trajectories
+        n_data = 0
         cur_frame = len(traj_starts)-1-num_frames
         while cur_frame >= 0:
             if cur_frame < 0:
@@ -170,15 +159,21 @@ class DynamicsData(Dataset):
             new_actions.append(actions[cur_frame:cur_frame+num_frames])
             new_pov_obs.append(pov_obs[cur_frame:cur_frame+num_frames])
             new_vec_obs.append(vec_obs[cur_frame:cur_frame+num_frames])
-            #new_rewards.append(rewards[cur_frame:cur_frame+num_frames])
+            new_rewards.append(rewards[cur_frame:cur_frame+num_frames])
             
-            # decrease frames
-            cur_frame -= num_frames
+            # check if enough data has been collected
+            if num_data > 0:
+                n_data += 1
+                if n_data >= num_data:
+                    break
+            else:
+                # decrease frames
+                cur_frame -= num_frames
 
         self.actions = np.array(new_actions)
         self.pov_obs = np.array(new_pov_obs)
         self.vec_obs = np.array(new_vec_obs)
-        #self.rewards = np.array(new_rewards)
+        self.rewards = np.array(new_rewards)
 
 
     def __len__(self):
@@ -191,8 +186,9 @@ class DynamicsData(Dataset):
 
         vec_obs = self.vec_obs[idx].astype(np.float32)
         act = self.actions[idx].astype(np.float32)
+        rew = self.rewards[idx].astype(np.float32)
 
-        return pov, vec_obs, act
+        return pov, vec_obs, act, rew
 
 
 class BehavCloneData(Dataset):

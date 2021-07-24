@@ -4,8 +4,8 @@ import argparse
 def main(args):
     # skip envs that are already downloaded 
     # to not having to run everything again while still debugging
-    skipenvs = ['MineRLNavigateExtremeVectorObf-v0',
-        'MineRLNavigateExtremeDenseVectorObf-v0']
+    skipenvs = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0', 'MineRLNavigateExtremeVectorObf-v0',
+        'MineRLNavigateExtremeDenseVectorObf-v0','MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0']
     for env in ENVS:
         if env in skipenvs:
             continue

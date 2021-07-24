@@ -1,4 +1,4 @@
-import models
+import visual_models
 import datasets
 
 import torch
@@ -17,7 +17,7 @@ import argparse
 # for debugging
 torch.autograd.set_detect_anomaly(True)
 
-STR_TO_CLASS = {'Conv':models.ConvVAE, 'CLSTM':models.CLSTMVAE}
+STR_TO_CLASS = {'Conv':visual_models.ConvVAE, 'ResNet':visual_models.ResnetVAE}
 
 class GenerateCallback(pl.Callback):
 
@@ -86,7 +86,7 @@ class GenerateCallback(pl.Callback):
         trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
 
 
-def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode):
+def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data, epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode, latent_dim, beta):
     
     # make sure that relevant dirs exist
     run_name = f'{model_class}_VAE/{env_name}'
@@ -95,9 +95,8 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, epochs, l
     print(f'Saving logs and model to {log_dir}')
 
     kernel_size = 3
-    num_frames = 1
     img_shape = (64,64)
-    latent_dim = 128 # CHANGED
+    num_blocks = [3,3,3,3,3]
     num_encoder_channels = [32,64,128,256] # channels for encoder
     num_decoder_channels = num_encoder_channels.copy()
     num_decoder_channels.reverse()
@@ -121,7 +120,6 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, epochs, l
         'latent_dim':latent_dim
     }
     '''
-    
     encoder_kwargs = {
         'img_shape':img_shape,
         'latent_dim':latent_dim,
@@ -134,17 +132,20 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, epochs, l
         'kernel_size':kernel_size
     }
     
-    
+    if model_class == 'ResNet':
+        encoder_kwargs['num_blocks'] = num_blocks
+        decoder_kwargs['num_blocks'] = num_blocks
+
     # init model
     scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
-    model = STR_TO_CLASS[model_class](encoder_kwargs, decoder_kwargs, lr, scheduler_kwargs, batch_size)
+    model = STR_TO_CLASS[model_class](encoder_kwargs, decoder_kwargs, lr, scheduler_kwargs, batch_size, beta)
 
     # load data
-    data = datasets.OfflineData(env_name, data_dir, num_frames)
+    data = datasets.VAEData(env_name, data_dir, num_data)
     lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
     train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=3)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=3)
+    train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=6)
+    val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=6)
 
     num_batches = len(train_data) // batch_size
     if len(train_data) % batch_size != 0:
@@ -158,7 +159,7 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, epochs, l
     checkpoint_callback = ModelCheckpoint(mode="min", monitor="Validation/bpd", save_last=True)
 
     trainer=pl.Trainer(
-                    precision=16, #32 is normal, 16 is mixed precision
+                    precision=32, #32 is normal, 16 is mixed precision
                     progress_bar_refresh_rate=100, #every N batches update progress bar
                     callbacks=[img_callback, checkpoint_callback],
                     gpus=torch.cuda.device_count(),
@@ -177,9 +178,12 @@ if __name__=='__main__':
     parser.add_argument('--data_dir')
     parser.add_argument('--log_dir')
     parser.add_argument('--env_name')
-    parser.add_argument('--model_class', choices=['Conv','CLSTM'])
+    parser.add_argument('--model_class', choices=['Conv','CLSTM', 'ResNet'])
     parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
+    parser.add_argument('--latent_dim', default=128, type=int)
     parser.add_argument('--epochs', default=1, type=int)
+    parser.add_argument('--beta', default=1, type=float, help='Beta param for beta-VAE')
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
     parser.add_argument('--lr_gamma', default=0.5, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')

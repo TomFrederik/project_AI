@@ -1,4 +1,4 @@
-import models
+import dynamics_models
 import datasets
 
 import torch
@@ -18,11 +18,11 @@ import argparse
 torch.autograd.set_detect_anomaly(True)
 
 STR_TO_MODEL = {
-    'mdn':models.MDNLSTMDynamicsModel,
-    'node':models.NODEDynamicsModel
+    'rssm':dynamics_models.RSSM,
+    'node':dynamics_models.NODEDynamicsModel
 }
 
-def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_perc, eval_freq, batch_size, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path):
+def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_perc, eval_freq, batch_size, num_data, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{env_name}'
@@ -37,7 +37,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_per
     if dynamics_model == 'node':
         seq_len = seq_len
         hidden_dims = [512,512,512]
-        base_model_class = models.DynamicsBaseModel
+        base_model_class = dynamics_models.DynamicsBaseModel
         base_model_kwargs = {'input_dim':256, 'hidden_dims':hidden_dims}
         
         model_kwargs = {
@@ -49,19 +49,17 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_per
             'scheduler_kwargs':scheduler_kwargs
         }
         monitor = 'Validation/loss'
-    elif dynamics_model == 'mdn':
-        seq_len = seq_len
-        latent_dim = 128
-        lstm_kwargs = {'input_size':256, 'num_layers':1, 'hidden_size':1024}
+    elif dynamics_model == 'rssm':
+        seq_len = seq_len        
+        lstm_kwargs = {'num_layers':1, 'hidden_size':1024}
         model_kwargs = {
             'lstm_kwargs':lstm_kwargs, 
             'seq_len':seq_len, 
-            'latent_dim':latent_dim,
             'VAE_path':model_path,
             'optim_kwargs':optim_kwargs,
             'scheduler_kwargs':scheduler_kwargs
         }
-        monitor = 'Validation/nll_loss'
+        monitor = 'Validation/loss'
     else:
         ValueError(f"Unrecognized model {dynamics_model}")
     ##
@@ -70,7 +68,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_per
     model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
-    data = datasets.DynamicsData(env_name, data_dir, seq_len)
+    data = datasets.DynamicsData(env_name, data_dir, seq_len, num_data)
     lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
     train_data, val_data = random_split(data, lengths)
     train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=3)
@@ -103,9 +101,10 @@ if __name__=='__main__':
     parser.add_argument('--data_dir')
     parser.add_argument('--log_dir')
     parser.add_argument('--env_name')
-    parser.add_argument('--dynamics_model', default='mdn', choices=['mdn', 'node'], help='Model used to predict the next latent state')
+    parser.add_argument('--dynamics_model', default='rssm', choices=['rssm', 'node'], help='Model used to predict the next latent state')
     parser.add_argument('--seq_len', default=4, type=int)
     parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
     parser.add_argument('--lr_gamma', default=0.5, type=float, help='Learning rate adjustment factor')
