@@ -8,68 +8,7 @@ import utils
 import visual_models
 import util_models
 
-class PlaNetExperiment():
 
-    def __init__(self, planet_kwargs, env_name):
-        self.planet = PlaNet(**planet_kwargs)
-        self.env_name = env_name
-    
-    def run(self):
-
-        # init env
-        env = gym.make(self.env_name)
-        obs = env.reset()
-        rew = 0
-        done = False
-
-        
-class PlaNet(nn.Module):
-    '''
-    Adapted from https://arxiv.org/pdf/1811.04551.pdf
-    '''
-    def __init__(self, rssm_path, action_repeat, max_opt_iter, num_act_sequences, planning_horizon, top_k):
-        super()__init__()
-        self.rssm = RSSM.load_from_checkpoint(rssm_path)
-        self.action_repeat = action_repeat
-        self.action_dim = 64
-        self.max_opt_iter = max_opt_iter
-        self.num_act_sequences = num_act_sequences
-        self.planning_horizon = planning_horizon
-        self.top_k = top_k
-
-    def forward(self, input):
-        pass
-    
-    def _get_batched_action_sequences(self, dist):
-        act = dist.sample(self.num_act_sequence)
-        return act.reshape(act.shape[0], self.planning_horizon, self.action_dim)
-
-    def plan(self, s_mean, s_std):
-        '''
-        s_mean - mean of belief over state, shape (D,)
-        s_std - std of belief over state, shape (D,)
-        '''
-        dist_dim = self.action_dim * self.planning_horizon
-        dist = torch.distributions.normal.Normal(loc=torch.zeros(dist_dim), loc=torch.ones(dist_dim))
-        a = dist.sample(sample_shape=torch.Size([self.num_act_sequence]))
-        print(f'sample shape = {a.shape}')
-
-        for opt_iter in range(self.max_opt_iter):
-            # sample action sequence batch
-            act_seq = self._get_batched_action_sequences(dist)
-            # compute beliefs over next states
-
-            # sample state trajectory from belief
-
-            # predict cumulative reward from state belief and sample
-
-            # pick the K best action sequences
-
-            # re-compute mean and std of dist from the K best action sequences
-
-            # re-parameterize the dist
-        
-        # return first action mean of the latest distribution
 
 class RSSM(pl.LightningModule):
     def __init__(self, lstm_kwargs, VAE_path, optim_kwargs, scheduler_kwargs, seq_len):
@@ -103,11 +42,35 @@ class RSSM(pl.LightningModule):
         self.elu = nn.ELU()
         self.reward_network = nn.Sequential(nn.Linear(3 * (self.latent_dim + 64), 1), nn.GELU())
 
-    def forward(self, model_input):
-        h_t, _ = self.lstm(model_input)
-        h_t = self.merge(h_t) # merge frames with batch
-        #print(f'h_t.shape = {h_t.shape}')
-        s_dist = self.mdn_network(h_t) # compute next deterministic state
+    
+    def forward_latent(self, states, actions, h0=None, c0=None, batched=False):
+        '''
+        Helper function which takes (a sample of the current belief over the) current state or a sequence thereof
+        as well as the action taken in that state or states, as well as the current lstm state and computes a belief
+        over the next state as well as a prediction of the reward
+        For other inputs and outputs, see RSSM.forward().
+        Input:
+            states - ([B], T, 64 + latent_dim)
+        '''
+        # concat states and action
+        if batched:
+            lstm_input = torch.cat([states, actions], dim=2)
+        else:
+            lstm_input = torch.cat([states, actions], dim=1)
+        
+        # compute hidden states of lstm
+        if h0 is None or c0 is None:
+            h_t, (h_n, c_n) = self.lstm(lstm_input)
+        else:
+            h_t, (h_n, c_n) = self.lstm(lstm_input, h0, c0)
+        
+        
+        if batched:
+            # merge frames with batch
+            h_t = self.merge(h_t) 
+
+        # compute next deterministic state
+        s_dist = self.mdn_network(h_t) 
         s_mean, s_preact_std = torch.chunk(s_dist, chunks=2, dim=1)
         s_std = self.elu(s_preact_std) + 1 # make sure std is non-negative #TODO: could add minimum std here
 
@@ -116,11 +79,43 @@ class RSSM(pl.LightningModule):
         
         # predict reward given h_t and s_t
         rew_input = torch.cat([s_mean, s_std, s_t], dim=1)
-        #print(f'rew_input.shape = {rew_input.shape}')
         r_t = self.reward_network(rew_input)
-        #print(f'r_t.shape = {r_t.shape}')
 
-        return (s_mean, s_std), s_t, r_t
+        return (s_mean, s_std), s_t, r_t, (h_n, c_n)
+
+    def forward(self, pov, vec, actions, h0=None, c0=None, batched=False):
+        '''
+        Given the last state, latest obs and taken action, this function computes 
+        the belief over the next state, as well as predicts the reward.
+        Inputs:
+            pov - ([B], T, 3, 64, 64)
+            vec - ([B], T, 64)
+            actions - ([B], T, 64)
+            h0 - ([B], lstm_kwargs['hidden_size'],)
+            c0 - ([B], lstm_kwargs['hidden_size'],)
+            batched - Bool, whether pov, vec, actions have a batch dimension before the time dimension
+        Output:
+            (s_mean, s_std) - belief over state, shape ([B], T, latent_dim + action_dim)
+            s_t -  sample from the above factorized normal distribution
+            r_t - predicted reward
+            (h_n, c_n) - last hidden and cell state of the lstm
+        '''
+        if batched:
+            # merge pov
+            pov = self.merge(pov)
+
+        # encode pov to latent
+        pov_mean, pov_std, pov_sample = self.VAE.encode_only(pov) 
+        
+        # split frames from batch again
+        pov_sample = self.split(pov_sample)
+        
+        # construct state sample
+        states = torch.cat([pov_sample, vec], dim=2)
+        (s_mean, s_std), s_t, r_t, (h_n, c_n) = self.forward_latent(states, actions, h0, c0, batched)        
+        
+        return (s_mean, s_std), s_t, r_t, (h_n, c_n)
+        
 
     def _get_log_p(self, x, mean, std):
         '''
@@ -140,26 +135,12 @@ class RSSM(pl.LightningModule):
         '''
         # get data
         pov, vec, actions, rew = batch
-        
+
         # merge frames with batch for batch processing
-        pov = self.merge(pov)
         merged_vec = self.merge(vec[:,1:,:])
         merged_rew = self.merge(rew[:,1:])
-        
-        # encode pov to latent
-        pov_mean, pov_std, pov_sample = self.VAE.encode_only(pov) 
-        
-        # split frames from batch again
-        pov_sample = self.split(pov_sample)
-        
-        # prepare model input
-        #print(f'pov_sample.shape: {pov_sample.shape}')
-        #print(f'vec.shape: {vec.shape}')
-        #print(f'actions.shape: {actions.shape}')
-        model_input = torch.cat([pov_sample, vec, actions], dim=2)
-        
-        # create predictions
-        (s_mean, s_std), s_t, r_t = self(model_input)
+
+        (s_mean, s_std), s_t, r_t, (h_n, c_n) = self(pov, vec, actions, batched=True)
 
         # extract distributions from the tensors
         predicted_z_mean = s_mean[:,:self.latent_dim]
