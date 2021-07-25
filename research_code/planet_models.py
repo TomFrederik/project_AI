@@ -1,62 +1,80 @@
 import torch
 import torch.nn as nn
 import torchvision as tv
-import pytorch_lightning as pl
-import numpy as np
-import utils
 import gym
+import numpy as np
 
-import visual_models
-import util_models
 import dynamics_models
 
 
 class PlaNetExperiment():
 
-    def __init__(self, planet_kwargs, env_name, action_repeat):
+    def __init__(self, planet_kwargs, env_name, action_repeat, exploration_noise):
         self.planet = PlaNet(**planet_kwargs)
         self.action_repeat = action_repeat
         self.env_name = env_name
-    
+        self.exploration_noise = exploration_noise
+
     def run(self):
         # init env
         env = gym.make(self.env_name)
         obs = env.reset()
         done = False
-        action = env.action_space.noop()
-
+        action = env.action_space.no_op() # init with null action
         total_rew = 0
 
-        h_n = torch.zeros(0)
-        
+        h_n = None
+        c_n = None
+
         while not done:
+            # init obs and act stacks
             pov_list = []
             vec_list = []
             act_list = []
-            for _ in range(self.action_repeat):
-                rew, obs, done, _ = env.step(action)
+            
+            # repeatedly take last computed action and record results
+            for r in range(self.action_repeat):
                 
                 # stack observations and actions
-                pov_list.append(tv.transform.pil_to_tensor(obs['pov']))
+                pov_list.append(tv.transforms.functional.to_tensor(obs['pov']))
                 vec_list.append(torch.from_numpy(obs['vector']))
                 act_list.append(torch.from_numpy(action))
                 
+                # take action and observe
+                rew, obs, done, _ = env.step(action)
+
                 # keep track of reward
                 total_rew += rew
                 
                 # check whether done
-                if done: break
+                if done:
+                    break
 
             # check whether done
-            if done: break
-            
+            if done:
+                break
+
             # stack observations and actions along time dimension
             pov = torch.stack(pov_list, dim=0)
             vec = torch.stack(vec_list, dim=0)
-            act = torch.stack(act_list, dim=0)
+            actions = torch.stack(act_list, dim=0)
+            
+            # compute belief over state, i.e. encode via VAE
+            all_z_mean, all_z_std, all_z_samples = self.planet.rssm.VAE.encode_only(pov)
+            
+            
+            # construct belief. Since vec is given, it has zero std
+            s_mean = torch.cat([all_z_mean, vec], dim=1)
+            s_std = torch.cat([all_z_std, torch.zeros_like(vec)], dim=1)
+            s_samples = torch.cat([all_z_samples, vec], dim=1)
+
+            (s_mean, s_std), s_t, r_t, (h_n, c_n) = self.planet.rssm.forward_latent(s_samples, actions, h_n, c_n, batched=False)
             
             # plan from current state
-            action = self.planet(pov, vec, h_n, c_n)
+            action = self.planet(s_mean, s_std, h_n, c_n)
+            
+            # apply noise
+            action += np.random.normal(loc=0, scale=self.exploration_noise, size=action.shape)
         
         print(f'Total reward = {total_rew}')
         return total_rew
@@ -74,17 +92,10 @@ class PlaNet(nn.Module):
         self.planning_horizon = planning_horizon
         self.top_k = top_k
 
-    def forward(self, pov, vec, h_n, c_n):
+    def forward(self, s_mean, s_std, h_n, c_n):
         '''
         Takes the last observation and lstm state
         '''
-        # compute belief over state, i.e. encode via VAE
-        z_mean, z_std, z_sample = self.rssm.VAE.encode_only(pov)
-        
-        # construct belief. Since vec is given, it has zero std
-        s_mean = torch.cat([z_mean, vec], dim=1)
-        s_std = torch.cat([z_std, torch.zeros_like(vec)], dim=1)
-
         # compute best next action via CEM planning
         action = self.plan(s_mean, s_std, h_n, c_n).detach().cpu().numpy()
 
