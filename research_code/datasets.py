@@ -116,7 +116,7 @@ class VAEData(Dataset):
         # transform image to float array
         pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
 
-        return self.actions[idx].astype(np.int64), pov, self.vec_obs[idx], self.rewards[idx]
+        return self.actions[idx].astype(np.float32), pov, self.vec_obs[idx], self.rewards[idx]
 
 
 class DynamicsData(Dataset):

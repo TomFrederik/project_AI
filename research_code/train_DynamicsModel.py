@@ -22,7 +22,7 @@ STR_TO_MODEL = {
     'node':dynamics_models.NODEDynamicsModel
 }
 
-def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_perc, eval_freq, batch_size, num_data, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path):
+def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_perc, eval_freq, batch_size, num_data, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path, VAE_class):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{env_name}'
@@ -57,7 +57,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_per
             'seq_len':seq_len, 
             'VAE_path':model_path,
             'optim_kwargs':optim_kwargs,
-            'scheduler_kwargs':scheduler_kwargs
+            'scheduler_kwargs':scheduler_kwargs,
+            'VAE_class':VAE_class
         }
         monitor = 'Validation/loss'
     else:
@@ -112,6 +113,7 @@ if __name__=='__main__':
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
     parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct a random val image for tensorboard')
+    parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet'])
 
     args = vars(parser.parse_args())
 

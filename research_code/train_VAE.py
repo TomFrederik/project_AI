@@ -86,7 +86,9 @@ class GenerateCallback(pl.Callback):
         trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
 
 
-def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data, epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode, latent_dim, beta):
+def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data, 
+                epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode,
+                latent_dim, beta, num_encoder_channels):
     
     # make sure that relevant dirs exist
     run_name = f'{model_class}_VAE/{env_name}'
@@ -96,8 +98,7 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data,
 
     kernel_size = 3
     img_shape = (64,64)
-    num_blocks = [3,3,3,3,3]
-    num_encoder_channels = [32,64,128,256] # channels for encoder
+    num_blocks = [2,2,2,2,2]
     num_decoder_channels = num_encoder_channels.copy()
     num_decoder_channels.reverse()
     print(f'\nnum_encoder_channels = {num_encoder_channels}')
@@ -190,6 +191,7 @@ if __name__=='__main__':
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
     parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct a random val image for tensorboard')
+    parser.add_argument('--num_encoder_channels', default=[32,64,128,256], type=int, nargs='+')
 
     args = vars(parser.parse_args())
 
