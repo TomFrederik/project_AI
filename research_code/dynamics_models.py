@@ -80,13 +80,16 @@ class RSSM(pl.LightningModule):
 
         # compute next deterministic state
         s_dist = self.mdn_network(h_t) 
-        s_mean, s_preact_std = torch.chunk(s_dist, chunks=2, dim=-1)
+        s_mean, s_logstd = torch.chunk(s_dist, chunks=2, dim=-1)
         # skip connection for the mean to bias it towards no change
         if batched and len(states.shape) == 3:
             s_mean = s_mean + self.merge(states)
         elif not batched and len(states.shape) == 2:
             s_mean = s_mean + states
-        s_std = self.elu(s_preact_std-3)+1 # make sure std is non-negative #TODO: could add minimum std here
+        else:
+            raise ValueError(f'Unexpected error: batched = {batched} but len(states.shape) = {len(states.shape)} ({states.shape}) ')
+        
+        s_std = torch.exp(s_logstd) # make sure std is non-negative #TODO: could add minimum std here
         # TODO calculate the off-set from the first true std instead of hard-coding it
 
         # sample from the multi-dim gaussian parameterized by h_t
@@ -118,7 +121,7 @@ class RSSM(pl.LightningModule):
             pov_std - ([B], T, latent_dim) ground truth state std
         '''
         if batched:
-            # merge pov
+            # merge frames with batch
             pov = self.merge(pov)
 
         # encode pov to latent
@@ -126,15 +129,12 @@ class RSSM(pl.LightningModule):
         
         if batched:
             # split frames from batch again
-            pov_sample = self.split(pov_sample)
+            pov_mean, pov_std, pov_sample = self.split(pov_mean), self.split(pov_std), self.split(pov_sample)
         
         # construct state sample
         states = torch.cat([pov_sample, vec], dim=2 if batched else 1)
 
         (s_mean, s_std), s_t, r_t, (h_n, c_n) = self.forward_latent(states, actions, h0, c0, batched)        
-        
-        if batched:
-            pov_mean, pov_std = self.split(pov_mean), self.split(pov_std)
         
         return (s_mean, s_std), s_t, r_t, (h_n, c_n), pov_mean, pov_std
         
@@ -187,9 +187,10 @@ class RSSM(pl.LightningModule):
         # compute KL divergence between h_t = (m1, s1) and (pov_mean, pov_std)
         pov_mean, pov_std = self.merge(pov_mean[:,1:,:]), self.merge(pov_std[:,1:,:])
         predicted_z_mean, predicted_z_std = self.merge(self.split(predicted_z_mean)[:,:-1,:]), self.merge(self.split(predicted_z_std)[:,:-1,:])
-        #print(f'predicted_z_mean.shape = {predicted_z_mean.shape}')
-        pred_z_dist = (predicted_z_mean, predicted_z_std)
-        kld = self._compute_kl(pred_z_dist, (pov_mean, pov_std))
+
+        # compute KL(enc(o) || pred(z)) in paper, but that seems to lead to bad behavior for us.
+        # so for now we comput KL(pred(z) || enc(o))
+        kld = self._compute_kl((predicted_z_mean, predicted_z_std), (pov_mean, pov_std))
         
         # sum up all losses, split them into frames, sum over frames and average over batch
         v_loss = self.split_cut(v_loss).sum(dim=[1,2]).mean() #sum over 1 and 2 in deterministic case, since we didn't reduce over the feature dim
@@ -207,7 +208,7 @@ class RSSM(pl.LightningModule):
     
     def _compute_kl(self, p, q):
         '''
-        Computes KL divergence between two gaussians p and q with diagonal covariance matrix
+        Computes KL divergence KL(p || q) between two gaussians p and q with diagonal covariance matrix
         Args:
             p - (mean1, std1), where mean1 and std1 are of shape (B*T, D) with batch dimension B and num frames T
             q - (mean2, std2)
@@ -220,7 +221,7 @@ class RSSM(pl.LightningModule):
         #print(f'Mean 2 = {mean2.mean()}')
         #print(f'Std 1 = {std1.mean()}')
         #print(f'Std 2 = {std2.mean()}')
-        kld = 0.5 * (torch.log((std2 ** 2)/ (std1 ** 2)) + (std1 ** 2) / (std2 ** 2) + ((mean2 - mean1) ** 2) / (std2 ** 2)) - 0.5#, constant summands don't matter for gradients.
+        kld = torch.log(std2 / std1) + 0.5 * (std1 ** 2 + (mean2 - mean1) ** 2) / (std2 ** 2) - 0.5#, constant summands don't matter for gradients.
         kld = kld.sum(dim=1)
         #print(f'kld ={kld.mean()}')
         return kld
