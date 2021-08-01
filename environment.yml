@@ -9,7 +9,8 @@ dependencies:
   - pip
   - py-opencv
   - cudatoolkit=11.1
-  - pytorch=1.9.0
+  - cudatoolkit-dev=11.1
+  - pytorch=1.9.0=py3.9_cuda11.1_cudnn8.0.5_0
   - torchvision
   - pip:
     - crowdai_api
@@ -17,3 +18,4 @@ dependencies:
     - coloredlogs
     - matplotlib
     - pyro4
+    - deepspeed

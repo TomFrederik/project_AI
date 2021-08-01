@@ -3,9 +3,14 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
 import utils
+from torch.cuda.amp import autocast 
+from torch.optim import AdamW
+
 
 import util_models
 from torchvision.transforms import ToPILImage # used to transform input to VAE to uint image
+from deepspeed.ops.adam import  DeepSpeedCPUAdam, FusedAdam
+import deepspeed
 
 
 class ConvEncoder(nn.Module):
@@ -118,6 +123,7 @@ class VAE(pl.LightningModule):
             self.decoder = decoder_class(**decoder_kwargs, img_shape_list=img_shape_list)
 
         self.CE_loss = nn.CrossEntropyLoss(reduction='none')
+        self.mse_loss = nn.MSELoss()
 
         self.transform = ToPILImage(mode='RGB')
     
@@ -145,9 +151,10 @@ class VAE(pl.LightningModule):
 
         # sample from the 255-category distribution
         sampled_x = torch.multinomial(probs.transpose(0,1).flatten(start_dim=1).transpose(0,1), 1).squeeze().reshape(x.shape)
-        
+        #sampled_x = self.decoder(z)
         return sampled_x.float() / 255
-    
+        #return sampled_x
+
     @torch.no_grad()
     def encode_only(self, x):
         '''
@@ -172,30 +179,39 @@ class VAE(pl.LightningModule):
 
         # sample from the 255-category distribution
         sampled_x = torch.multinomial(probs.transpose(0,1).flatten(start_dim=1).transpose(0,1), 1).squeeze().reshape((-1, 3, 64, 64))
-        
+        #sampled_x = self.decoder(z)
+
         return sampled_x.float() / 255
-    
+
     def forward(self, x):
         '''
         x - input, for mineRL (B, C, H, W) batch of frames
         '''
         # encode
+        x.requires_grad = True
+        
+        #mean, log_std = deepspeed.checkpointing.checkpoint(self.encoder, x)
         mean, log_std = self.encoder(x)
-
+        
         # compute KL difstance, i.e. regularization loss
-        L_regul = (0.5 * (torch.exp(2 * log_std) + mean ** 2 - 1 - 2 * log_std)).sum(dim=-1)
+        L_regul = (0.5 * (torch.exp(2 * log_std) + mean ** 2 - 1 - 2 * log_std)).sum(dim=-1).mean()
 
         # sample latent vector
         z = self.sample(mean, log_std)
-
         # decode
+        #x_new = deepspeed.checkpointing.checkpoint(self.decoder, z)
         x_new = self.decoder(z)
         
         # convert x to classes
         x = (x * 255).type(torch.long)
-        
+
+        # make sure that x_new is fp32, otherwise nan error in loss
+        #x_new = x_new.float()
+
         # compute reconstruction loss, sum over all dimension except batch
-        L_reconstr = self.CE_loss(x_new, x).sum(dim=list(range(1,len(x.shape))))
+        L_reconstr = self.CE_loss(x_new, x).sum(dim=list(range(1,len(x.shape)))).mean()
+        #L_reconstr = self.mse_loss(x_new,x)
+        print(f"L_reconstr = {L_reconstr.item()}")
 
         # compute elbo
         elbo =  L_reconstr + self.beta * L_regul
@@ -203,15 +219,11 @@ class VAE(pl.LightningModule):
         # convert into bits per dimension loss
         bpd = (elbo * np.log2(np.exp(1)) / np.prod(x.shape[1:])).mean()
 
-        # take means
-        L_reconstr = torch.mean(L_reconstr)
-        L_regul = torch.mean(L_regul)
-        
         return L_reconstr, L_regul, bpd
     
     def configure_optimizers(self):
         # set up optimizer
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer =  AdamW(self.parameters(), lr=self.learning_rate)
         # set up 
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.scheduler_kwargs['lr_gamma'])
         lr_dict = {
@@ -224,6 +236,8 @@ class VAE(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         img = batch[1]
         _, _, bpd = self(img)
+        print(f'Step {self.global_step + 1}: bpd = {bpd.mean().item()}')
+        
         self.log('Training/batch_bpd', bpd.mean().item(),on_step=True)
 
         return bpd
@@ -354,6 +368,8 @@ class ResnetDecoder(nn.Module):
         # conv to 3 * 255 channels
         layers.append(nn.Conv2d(num_channels[-1], 768, kernel_size=kernel_size, padding=padding))
         layers.append(util_models.SplitChannelsFromClasses(num_channels=3))
+        #layers.append(nn.Conv2d(num_channels[-1], 3, kernel_size=kernel_size, padding=padding))
+        #layers.append(nn.Sigmoid())
         self.deconv = nn.Sequential(*layers)
 
 

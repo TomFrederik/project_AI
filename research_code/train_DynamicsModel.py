@@ -19,13 +19,18 @@ torch.autograd.set_detect_anomaly(True)
 
 STR_TO_MODEL = {
     'rssm':dynamics_models.RSSM,
-    'node':dynamics_models.NODEDynamicsModel
+    'node':dynamics_models.NODEDynamicsModel,
+    'mdn':dynamics_models.MDN_RNN
 }
 
-def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_perc, eval_freq, batch_size, num_data, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, model_path, VAE_class):
+def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
+                        val_perc, eval_freq, batch_size, num_data, epochs, 
+                        lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
+                        model_path, VAE_class, num_components, temp, skip_connection,
+                        val_check_interval):
     
     # make sure that relevant dirs exist
-    run_name = f'DynamicsModel/{env_name}'
+    run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
     log_dir = os.path.join(log_dir, run_name)
     os.makedirs(log_dir, exist_ok=True)
     print(f'Saving logs and model to {log_dir}')
@@ -61,6 +66,21 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_per
             'VAE_class':VAE_class
         }
         monitor = 'Validation/loss'
+    elif dynamics_model == 'mdn':
+        seq_len = seq_len        
+        lstm_kwargs = {'num_layers':1, 'hidden_size':1024}
+        model_kwargs = {
+            'lstm_kwargs':lstm_kwargs, 
+            'seq_len':seq_len, 
+            'VAE_path':model_path,
+            'optim_kwargs':optim_kwargs,
+            'scheduler_kwargs':scheduler_kwargs,
+            'VAE_class':VAE_class,
+            'num_components':num_components,
+            'temp':temp,
+            'skip_connection':skip_connection
+        }
+        monitor = 'Validation/loss'
     else:
         ValueError(f"Unrecognized model {dynamics_model}")
     ##
@@ -90,6 +110,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, val_per
                     gpus=torch.cuda.device_count(),
                     accelerator='dp', #anything else here seems to lead to crashes/errors
                     default_root_dir=log_dir,
+                    val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
                     max_epochs=epochs
                 )
     trainer.logger._default_hp_metric = None # optional logging metric that we don't need right now
@@ -102,7 +123,7 @@ if __name__=='__main__':
     parser.add_argument('--data_dir')
     parser.add_argument('--log_dir')
     parser.add_argument('--env_name')
-    parser.add_argument('--dynamics_model', default='rssm', choices=['rssm', 'node'], help='Model used to predict the next latent state')
+    parser.add_argument('--dynamics_model', default='rssm', choices=['rssm', 'node', 'mdn'], help='Model used to predict the next latent state')
     parser.add_argument('--seq_len', default=4, type=int)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
@@ -114,6 +135,10 @@ if __name__=='__main__':
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
     parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct a random val image for tensorboard')
     parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet'])
+    parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
+    parser.add_argument('--temp', type=float, default=1, help='Temperature parameter for gumbel softmax in MDN-RNN.')
+    parser.add_argument('--skip_connection', type=bool, default=True, help='Whether to use skip connection in MDN-RNN.')
+    parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
 
     args = vars(parser.parse_args())
 

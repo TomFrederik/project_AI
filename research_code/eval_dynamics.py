@@ -12,7 +12,8 @@ import torchvision as tv
 
 STR_TO_MODEL = {
     'rssm':dynamics_models.RSSM,
-    'node':dynamics_models.NODEDynamicsModel
+    'node':dynamics_models.NODEDynamicsModel,
+    'mdn':dynamics_models.MDN_RNN
 }
 
 def get_tensors(traj, idx, device):
@@ -37,7 +38,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     # pick some frame
     idx = 50
-    num_steps = 100
+    num_steps = 50
 
     if model_class == 'node':
         # overwrite model timesteps
@@ -60,11 +61,12 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     # encode pov
     enc_pov = model.VAE.encode_only(pov)[2]
+    rec_pov = model.VAE.decode_only(enc_pov)
 
     # prepare model input
     states = torch.cat([enc_pov, vec], dim=1)
     
-    if model_class == 'rssm':
+    if model_class in ['rssm', 'mdn']:
         predicted_states = model.predict_recursively(states, actions, horizon=num_steps)
         pred_pov = predicted_states[:, :128]
     else:
@@ -72,7 +74,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     
 
     # decode again into images:
-    model_output = model.VAE.decode_only(pred_pov.squeeze())
+    pred_pov = model.VAE.decode_only(pred_pov.squeeze())
     #rec_input = model.VAE.decode_only(enc_pov)
     #model_output = model.VAE.decode_only(model.VAE.encode_only(following_povs)[2])
 
@@ -80,9 +82,9 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     # visualize predicted pov and actual next frames
     images = []
     for i in range(len(pov)):
-        images.append(np.concatenate(((pov[i][[2,1,0],...].to('cpu').transpose(1,2).numpy()*255).astype(np.uint8), (pov[i][[2,1,0],...].transpose(1,2).to('cpu').numpy()*255).astype(np.uint8)), axis=1).transpose(2,1,0))
+        images.append(np.concatenate(((pov[i][[2,1,0],...].to('cpu').transpose(1,2).numpy()*255).astype(np.uint8), (rec_pov[i][[2,1,0],...].transpose(1,2).to('cpu').numpy()*255).astype(np.uint8)), axis=1).transpose(2,1,0))
     for i in range(len(following_povs)):
-        images.append(np.concatenate(((following_povs[i][[2,1,0],...].to('cpu').transpose(1,2).numpy()*255).astype(np.uint8), (model_output[i][[2,1,0],...].transpose(1,2).to('cpu').numpy()*255).astype(np.uint8)), axis=1).transpose(2,1,0))
+        images.append(np.concatenate(((following_povs[i][[2,1,0],...].to('cpu').transpose(1,2).numpy()*255).astype(np.uint8), (pred_pov[i][[2,1,0],...].transpose(1,2).to('cpu').numpy()*255).astype(np.uint8)), axis=1).transpose(2,1,0))
      
     size = images[0].transpose(1,0,2).shape[:-1]
 
@@ -91,7 +93,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     for i in range(len(images)):
         plt.figure()
-        plt.imshow(images[i])
+        plt.imshow(images[i][...,[2,1,0]])
         plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_{i}.png'))
         plt.close()
         out.write(images[i])

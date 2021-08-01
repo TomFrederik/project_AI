@@ -13,8 +13,249 @@ vae_model_by_str = {
     'ResNet':visual_models.ResnetVAE
 }
 
+EPS = 1e-10
+
+class MDN_RNN(pl.LightningModule):
+    def __init__(self, lstm_kwargs, optim_kwargs, scheduler_kwargs, seq_len, num_components, VAE_path, temp=1, VAE_class='Conv', skip_connection=True):
+        super().__init__()
+        
+        # save params
+        self.save_hyperparameters()
+
+        # load VAE
+        self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
+        self.VAE.eval()
+        self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
+
+        # save some vars
+        self.scheduler_kwargs = scheduler_kwargs
+        self.optim_kwargs = optim_kwargs
+        self.seq_len = seq_len
+        self.num_components = num_components
+        self.temp = temp
+        self.skip_connection = skip_connection
+
+        # set up model
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.merge = util_models.MergeFramesWithBatch()
+        self.split = util_models.SplitFramesFromBatch(self.seq_len)
+        self.split_cut = util_models.SplitFramesFromBatch(self.seq_len-1)
+        lstm_input_dim = self.latent_dim + 128 # s_t-1, a_t-1,  where s_t = [z_t, v_t]
+        self.lstm = nn.LSTM(**lstm_kwargs, input_size=lstm_input_dim, batch_first=True)
+        self.mdn_network = nn.Sequential(
+                                            nn.Linear(lstm_kwargs['hidden_size'], 1024), 
+                                            nn.ReLU(), 
+                                            nn.Linear(1024, 1024),
+                                            nn.ReLU(),
+                                            nn.Linear(1024, self.num_components + self.num_components * 2 * (self.latent_dim + 64))
+                                        ) # first num_component outputs determine the mixing coeffs, the rest parameterize the gaussians
+
+
+    def _step(self, batch):
+        # unpack batch
+        pov, vec, actions, _ = batch
+
+        # predict distribution over next state and sample
+        (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, target = self(pov, vec, actions, batched=True)
+
+        # extract distributions from the tensors
+
+        # cut off last prediction since it can't be scored
+        # also cut off first target since it was not predicted
+        s_mean = self.merge(self.split(s_mean)[:,:-1,:])
+        #print(f's_mean.shape = {s_mean.shape}')
+        #print(f's_mean = {s_mean}')
+        s_logstd = self.merge(self.split(s_logstd)[:,:-1,:])
+        #print(f's_logstd = {s_logstd}')
+        log_mix_coeffs = self.merge(self.split(log_mix_coeffs)[:,:-1,:])
+        #print(f'log_mix_coeffs = {log_mix_coeffs}')
+        target = self.merge(target[:,1:,:])
+        #print(f'target.shape = {target.shape}')
+        #print(f'log_mix_coeffs.shape = {log_mix_coeffs.shape}')
+        #print(f'log_mix_coeffs = {log_mix_coeffs}')
+
+        # chunk s_mean and s_logstd into the different comps
+        s_means = torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=-1), dim=1)
+        #print(f's_means.shape = {s_means.shape}')
+        s_logstds = torch.stack(torch.chunk(s_logstd, chunks=self.num_components, dim=-1), dim=1)
+        #print(f'Stds = {torch.exp(s_logstds).mean(dim=0)}')
+        # get log likelihood of target under distributions
+        # add EPS to std for stability
+        logp = -0.5 * ((target[:,None,:] - s_means) / (torch.exp(s_logstds) + EPS)) ** 2 - s_logstds - torch.log(torch.tensor(2*np.pi))
+        #print(f'logp = {logp}')
+        #print(f'logp.shape = {logp.shape}')
+        #print(f'exp(log_mix_coeffs) = {torch.exp(log_mix_coeffs)}')
+        #print(f'log_mix_coeffs == 0? {log_mix_coeffs[log_mix_coeffs == 0]}')
+        loss = -torch.logsumexp(log_mix_coeffs[...,None] + logp , dim=1).mean()
+        #print(f'loss.shape = {loss.shape}')
+        #print(f'loss = {loss}')
+        
+        return loss
+
+    def forward(self, pov, vec, actions, h0=None, c0=None, batched=False):
+        '''
+        Given the last state, latest obs and taken action, this function computes 
+        the belief over the next state, as well as predicts the reward.
+        Inputs:
+            pov - ([B], T, 3, 64, 64)
+            vec - ([B], T, 64)
+            actions - ([B], T, 64)
+            h0 - ([B], lstm_kwargs['hidden_size'],)
+            c0 - ([B], lstm_kwargs['hidden_size'],)
+            batched - Bool, whether pov, vec, actions have a batch dimension before the time dimension
+        Output:
+            (s_mean, s_logstd) - belief over state, shape ([B] * T, latent_dim + vec_dim)
+            s_t -  sample from the above factorized normal distribution
+            (h_n, c_n) - last hidden and cell state of the lstm
+            log_mix_coeffs - log of mixing coefficients, ([B] * T, num_components)
+            target - ([B], T, latent_dim + vec_dim) sample of ground truth encoding
+        '''
+        if batched:
+            # merge frames with batch
+            pov = self.merge(pov)
+
+        # encode pov to latent
+        # to do it like in paper, we just use a sample as target
+        _, _, pov_sample = self.VAE.encode_only(pov) 
+
+        if batched:
+            # split frames from batch again
+            pov_sample = self.split(pov_sample)
+
+        # construct state sample
+        states = torch.cat([pov_sample, vec], dim=2 if batched else 1)
+
+        (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, _ = self.forward_latent(states, actions, h0, c0, batched)     
+
+        # stack pov and vec to construct target
+        target = torch.cat([pov_sample, vec], dim=-1)   
+        
+        return (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, target
+    
+    def forward_latent(self, states, actions, h0=None, c0=None, batched=False):
+        '''
+        Helper function which takes (a sample of the current belief over the) current state or a sequence thereof
+        as well as the action taken in that state or states, as well as the current lstm state and computes a belief
+        over the next state as well as a prediction of the reward
+        Input:
+            states - ([B], T, 64 + latent_dim)
+            actions - ([B], T, 64)
+            h0 - ([B], lstm_kwargs['hidden_size'],)
+            c0 - ([B], lstm_kwargs['hidden_size'],)
+            batched - Bool, whether pov, vec, actions have a batch dimension before the time dimension
+        Output:
+            (s_mean, s_logstd) - belief over state, shape ([B] * T, 2 * latent_dim + action_dim)
+            s_t -  sample from the above factorized normal distribution
+            (h_n, c_n) - last hidden and cell state of the lstm
+            log_mix_coeffs - log of mixing coefficients, ([B] * T, num_components)
+        '''
+        # concat states and action
+        if batched:
+            lstm_input = torch.cat([states, actions], dim=2)
+        else:
+            lstm_input = torch.cat([states, actions], dim=1)[None,...]
+        
+        # compute hidden states of lstm
+        if h0 is None or c0 is None:
+            h_t, (h_n, c_n) = self.lstm(lstm_input)
+        else:
+            h_t, (h_n, c_n) = self.lstm(lstm_input, (h0,c0))
+        
+        # merge h_t
+        h_t = self.merge(h_t) 
+
+        # compute next state
+        mdn_out = self.mdn_network(h_t) 
+        log_mix_coeffs = torch.log(torch.nn.functional.gumbel_softmax(mdn_out[:,:self.num_components], tau=self.temp, dim=-1))
+        s_mean, s_logstd = torch.chunk(mdn_out[...,self.num_components:], chunks=2, dim=-1)
+
+        # skip connection for the mean to bias it towards no change
+        if self.skip_connection:
+            if batched and len(states.shape) == 3:
+                s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=1), dim=1) + self.merge(states)[:,None,:], start_dim=1, end_dim=-1)
+            elif not batched and len(states.shape) == 2:
+                s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=1), dim=1) + states[:,None,:], start_dim=1, end_dim=-1)
+
+            else:
+                raise ValueError(f'Unexpected error: batched = {batched} but len(states.shape) = {len(states.shape)} ({states.shape}) ')
+        
+        # sample from the mixture of multi-dim gaussians parameterized by h_t
+        #print(log_mix_coeffs)
+        #print(log_mix_coeffs.shape)
+        comp_t = torch.distributions.categorical.Categorical(logits=log_mix_coeffs).sample().long()
+        #print(f'comp_t.shape = {comp_t.shape}')
+        #print(f'comp_t = {comp_t}')
+        mean = torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=-1), dim=0)[comp_t, torch.arange(len(comp_t)), ...]
+        #print(mean.shape)
+        std = torch.exp(torch.stack((torch.chunk(s_logstd, chunks=self.num_components, dim=-1)), dim=0))[comp_t, torch.arange(len(comp_t)), ...]
+        s_t =  mean + std * torch.normal(torch.zeros_like(mean), torch.ones_like(std))
+        #print(f'std.shape = {std.shape}')
+
+        return (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, mean
+    
+    @torch.no_grad()
+    def predict_recursively(self, states, actions, horizon):
+        '''
+        Auto-regressively applies dynamics model. Actions for imagination are supplied, so only states are being predicted
+        Input:
+            states - (T, D), where D is latent_dim + obf_vector_dim
+            actions - (T + H, D_a), where D_a is obf_action_dim and H is the horizon
+            horizon - int, number of time steps to extrapolate
+        Output:
+            predicted_states - (H, D)
+        '''
+        assert horizon > 0, f"horizon must be greater 0, but is {horizon}!"
+
+        _, s_t, (h_n, c_n), _, mean = self.forward_latent(states, actions[:-horizon], h0=None, c0=None, batched=False)
+
+        state_list = []
+        for t in range(horizon):
+            # get last state and action
+            s_t = s_t[-1][None,:]
+            #s_t = mean[-1][None,:]
+            action = actions[-horizon+t][None,:]
+            
+            # save state
+            state_list.append(s_t)  
+
+            # sample next state
+            _, s_t, (h_n, c_n), _, mean = self.forward_latent(s_t, action, h0=h_n, c0=h_n, batched=False)
+
+        # concat states
+        predicted_states = torch.cat(state_list, dim=0)
+
+        return predicted_states
+
+    def training_step(self, batch, batch_idx):
+        # perform predictions and compute loss
+        loss = self._step(batch)
+
+        # score and log predictions
+        self.log('Training/loss', loss, on_step=True)
+        return loss
+        
+    def validation_step(self, batch, batch_idx):
+        # perform predictions and compute loss
+        loss = self._step(batch)
+        
+        # score and log predictions
+        self.log('Validation/loss', loss, on_epoch=True)
+        return loss
+    
+    def configure_optimizers(self):
+        # set up optimizer
+        optimizer = torch.optim.Adam(self.parameters(), **self.optim_kwargs)
+        # set up scheduler
+        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.scheduler_kwargs['lr_gamma'])
+        lr_dict = {
+            'scheduler': lr_scheduler,
+            'interval': self.scheduler_kwargs['lr_step_mode'],
+            'frequency': self.scheduler_kwargs['lr_decrease_freq'],
+        }
+        return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
+
 class RSSM(pl.LightningModule):
-    def __init__(self, lstm_kwargs, VAE_path, optim_kwargs, scheduler_kwargs, seq_len, VAE_class='Conv'):
+    def __init__(self, lstm_kwargs, optim_kwargs, scheduler_kwargs, seq_len, use_pretrained=True, VAE_path=None, VAE_class='Conv'):
         '''
         Adapted from https://arxiv.org/pdf/1811.04551.pdf
         '''
@@ -23,12 +264,21 @@ class RSSM(pl.LightningModule):
         
         # save params
         self.save_hyperparameters()
-    
-        # load VAE
-        self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
-        self.VAE.eval()
-        self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
 
+        if use_pretrained:
+            # load VAE
+            if VAE_path == None:
+                raise ValueError('Need to specify VAE path ')
+            self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
+            self.VAE.eval()
+            self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
+        else:
+            # init new VAE
+            if VAE_kwargs == None:
+                raise ValueError('Need to specify VAE kwargs ')
+            self.VAE = vae_model_by_str[VAE_class](**VAE_kwargs)
+            self.latent_dim = VAE_kwargs['latent_dim']
+        
         # save some vars
         self.scheduler_kwargs = scheduler_kwargs
         self.optim_kwargs = optim_kwargs
@@ -41,10 +291,10 @@ class RSSM(pl.LightningModule):
         self.split_cut = util_models.SplitFramesFromBatch(self.seq_len-1)
         lstm_input_dim = self.latent_dim + 128 # s_t-1, a_t-1,  where s_t = [z_t, v_t]
         self.lstm = nn.LSTM(**lstm_kwargs, input_size=lstm_input_dim, batch_first=True)
-        self.mdn_network = nn.Sequential(nn.Linear(lstm_kwargs['hidden_size'], 200), nn.ReLU(), nn.Linear(200, 2 * (self.latent_dim + 64)))
+        self.mdn_network = nn.Sequential(nn.Linear(lstm_kwargs['hidden_size'], 200), nn.ReLU(), nn.Linear(200, (2 * self.latent_dim + 64)))
         self.elu = nn.ELU()
         self.relu = nn.ReLU()
-        self.reward_network = nn.Sequential(nn.Linear(3 * (self.latent_dim + 64), 1024), nn.ReLU(), nn.Linear(1024, 1), nn.Sigmoid())
+        self.reward_network = nn.Sequential(nn.Linear(2 * (self.latent_dim + 64) + self.latent_dim, 1024), nn.ReLU(), nn.Linear(1024, 1), nn.Sigmoid())
     
     def forward_latent(self, states, actions, h0=None, c0=None, batched=False):
         '''
@@ -80,7 +330,10 @@ class RSSM(pl.LightningModule):
 
         # compute next deterministic state
         s_dist = self.mdn_network(h_t) 
-        s_mean, s_logstd = torch.chunk(s_dist, chunks=2, dim=-1)
+        z_mean, z_logstd = torch.chunk(s_dist[...,:2*self.latent_dim], chunks=2, dim=-1)
+        v_mean = s_dist[...,-64:] 
+        s_mean = torch.cat([z_mean, v_mean], dim=-1)
+
         # skip connection for the mean to bias it towards no change
         if batched and len(states.shape) == 3:
             s_mean = s_mean + self.merge(states)
@@ -89,17 +342,18 @@ class RSSM(pl.LightningModule):
         else:
             raise ValueError(f'Unexpected error: batched = {batched} but len(states.shape) = {len(states.shape)} ({states.shape}) ')
         
-        s_std = torch.exp(s_logstd) # make sure std is non-negative #TODO: could add minimum std here
-        # TODO calculate the off-set from the first true std instead of hard-coding it
+        #print(f'mean z_logstd = {self.split(s_logstd)[:,:-1,:self.latent_dim].mean()}')
+        z_std = torch.exp(z_logstd) # make sure std is non-negative #TODO: could add minimum std here
 
         # sample from the multi-dim gaussian parameterized by h_t
-        s_t = s_mean + s_std * torch.normal(torch.zeros_like(s_mean), torch.ones_like(s_std))
+        s_t = s_mean
+        s_t[...,:-64] = s_t[...,:-64] + z_std * torch.normal(torch.zeros_like(z_std), torch.ones_like(z_std))
         
         # predict reward given h_t and s_t
-        rew_input = torch.cat([s_mean, s_std, s_t], dim=1)
+        rew_input = torch.cat([s_mean, z_std, s_t], dim=1)
         r_t = self.reward_network(rew_input)
 
-        return (s_mean, s_std), s_t, r_t, (h_n, c_n)
+        return (s_mean, z_std), s_t, r_t, (h_n, c_n)
 
     def forward(self, pov, vec, actions, h0=None, c0=None, batched=False):
         '''
@@ -134,9 +388,9 @@ class RSSM(pl.LightningModule):
         # construct state sample
         states = torch.cat([pov_sample, vec], dim=2 if batched else 1)
 
-        (s_mean, s_std), s_t, r_t, (h_n, c_n) = self.forward_latent(states, actions, h0, c0, batched)        
+        (s_mean, z_std), s_t, r_t, (h_n, c_n) = self.forward_latent(states, actions, h0, c0, batched)        
         
-        return (s_mean, s_std), s_t, r_t, (h_n, c_n), pov_mean, pov_std
+        return (s_mean, z_std), s_t, r_t, (h_n, c_n), pov_mean, pov_std
         
 
     def _get_log_p(self, x, mean, std):
@@ -162,23 +416,20 @@ class RSSM(pl.LightningModule):
         merged_vec = self.merge(vec[:,1:,:])
         merged_rew = self.merge(rew[:,1:])
 
-        (s_mean, s_std), s_t, r_t, (h_n, c_n), pov_mean, pov_std = self(pov, vec, actions, batched=True)
+        (s_mean, z_std), s_t, r_t, (h_n, c_n), pov_mean, pov_std = self(pov, vec, actions, batched=True)
 
         # extract distributions from the tensors
         predicted_z_mean = s_mean[:,:self.latent_dim]
-        predicted_z_std = s_std[:,:self.latent_dim]
+        predicted_z_std = z_std
         #print(f'predicted_z_mean.shape = {predicted_z_mean.shape}')
 
         predicted_v_mean = s_mean[:,self.latent_dim:]
-        predicted_v_std = s_std[:,self.latent_dim:] # CURRENTLY NOT USED IN DET FORECAST
         #print(f'predicted_v_mean.shape = {predicted_v_mean.shape}')
 
         # compute log_prob of v_t under its dist
         # cut off last prediction since it can't be scored
         # also cut off first target since it was not predicted
         predicted_v_mean = self.merge(self.split(predicted_v_mean)[:,:-1,:])
-        predicted_v_std = self.merge(self.split(predicted_v_std)[:,:-1,:])# CURRENTLY NOT USED IN DET FORECAST
-        #v_loss = -self._get_log_p(merged_vec, predicted_v_mean, predicted_v_std)
         v_loss = self.mse_loss(merged_vec, predicted_v_mean)
 
         # compute mse of reward (is same as logp under scalar gaussian with unit variance --> see their paper)
@@ -190,12 +441,18 @@ class RSSM(pl.LightningModule):
 
         # compute KL(enc(o) || pred(z)) in paper, but that seems to lead to bad behavior for us.
         # so for now we comput KL(pred(z) || enc(o))
+        # specifically, the predicted std is ~1 oom too large in the KL(enc|pred) case, resulting in
+        # very wild extrapolations
         kld = self._compute_kl((predicted_z_mean, predicted_z_std), (pov_mean, pov_std))
+        #print(f'mean true z std = {pov_std.mean()}')
+        #print(f'mean predicted z std = {predicted_z_std.mean()}')
+        #print(f'mse std = {self.split_cut((pov_std-predicted_z_std)**2).sum(dim=1).mean()}')
         
         # sum up all losses, split them into frames, sum over frames and average over batch
-        v_loss = self.split_cut(v_loss).sum(dim=[1,2]).mean() #sum over 1 and 2 in deterministic case, since we didn't reduce over the feature dim
-        z_loss = self.split_cut(kld).sum(dim=1).mean()
-        r_loss = self.split_cut(mse_r).sum(dim=1).mean()
+        v_loss = self.split_cut(v_loss).sum(dim=2).mean() #sum over 2 in deterministic case, since we didn't reduce over the feature dim
+        z_loss = self.split_cut(kld).mean()
+        #print(f'kld = {z_loss}')
+        r_loss = self.split_cut(mse_r).mean()
         #print(f'z_loss = {z_loss}')
         #print(f'v_loss = {v_loss}')
         #print(f'r_loss = {r_loss}')
@@ -279,7 +536,7 @@ class RSSM(pl.LightningModule):
         '''
         assert horizon > 0, f"horizon must be greater 0, but is {horizon}!"
 
-        (s_mean, s_std), s_t, _, (h_n, c_n) = self.forward_latent(states, actions[:-horizon], h0=None, c0=None, batched=False)
+        (s_mean, z_std), s_t, _, (h_n, c_n) = self.forward_latent(states, actions[:-horizon], h0=None, c0=None, batched=False)
 
         state_list = []
         for t in range(horizon):
@@ -291,7 +548,7 @@ class RSSM(pl.LightningModule):
             state_list.append(s_t)        
 
             # sample next state
-            (s_mean, s_std), s_t, _, (h_n, c_n) = self.forward_latent(s_t, action, h0=h_n, c0=h_n, batched=False)
+            (s_mean, z_std), s_t, _, (h_n, c_n) = self.forward_latent(s_t, action, h0=h_n, c0=h_n, batched=False)
 
         # concat states
         predicted_states = torch.cat(state_list, dim=0)
