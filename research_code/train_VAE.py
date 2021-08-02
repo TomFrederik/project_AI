@@ -212,7 +212,7 @@ if __name__=='__main__':
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--precision', default=32, type=int, help='Numerical precision', choices=[16,32])
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
-    parser.add_argument('--accumulate_grad_batches', default=False, action='store_true')
+    parser.add_argument('--accumulate_grad_batches', default=1, type=int, help='How many batches to accumulate batches over')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())
