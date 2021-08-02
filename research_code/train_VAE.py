@@ -93,7 +93,7 @@ class GenerateCallback(pl.Callback):
 def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data, 
                 epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode,
                 latent_dim, beta, num_encoder_channels, val_check_interval, num_layers_per_block,
-                precision, load_from_checkpoint, version_dir):
+                precision, load_from_checkpoint, version_dir, accumulate_grad_batches):
     
     # make sure that relevant dirs exist
     run_name = f'{model_class}_VAE/{env_name}'
@@ -182,7 +182,8 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data,
                     default_root_dir=log_dir,
                     max_epochs=epochs,
                     val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
-                    gradient_clip_val=1)
+                    gradient_clip_val=1,
+                    accumulate_grad_batches=accumulate_grad_batches)
                     
     # fit model
     trainer.fit(model, train_loader, val_loader)
@@ -211,6 +212,7 @@ if __name__=='__main__':
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--precision', default=32, type=int, help='Numerical precision', choices=[16,32])
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
+    parser.add_argument('--accumulate_grad_batches', default=False, action='store_true')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())
