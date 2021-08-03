@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
-import utils
 from torch.cuda.amp import autocast 
 from torch.optim import AdamW
 

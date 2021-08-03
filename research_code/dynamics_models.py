@@ -4,9 +4,9 @@ import pytorch_lightning as pl
 import numpy as np
 import torchdiffeq as teq
 
-import research_code.visual_models as visual_models
-import research_code.util_models as util_models
-from research_code.reward_model import RewardMLP
+import visual_models
+import util_models
+from reward_model import RewardMLP
 
 vae_model_by_str = {
     'Conv':visual_models.ConvVAE,
@@ -132,7 +132,7 @@ class MDN_RNN(pl.LightningModule):
             target - ([B], T, latent_dim + vec_dim) sample of ground truth encoding
         '''
         
-        h_n, c_n = h0, c0
+        h_t, c_t = h0, c0
         
         if batched:
             # merge frames with batch
@@ -157,29 +157,50 @@ class MDN_RNN(pl.LightningModule):
         s_logstd_list = []
         log_mix_coeffs_list = []
         if latent_overshooting:
+            
+            # compute one-step predictions
+            (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs = self.forward_latent(states, actions, h_t, c_t, batched, stepwise=True)
+            
+            # extrapolate/imagine from each state
             for t in range(self.hparams.seq_len-1):
-                print(f'states.shape = {states.shape}')
-                (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs = self.forward_latent(states, actions, h_n, c_n, batched)
-                print(f's_mean.shape = {s_mean.shape}')
-                h_n, c_n = h_t[:,1], c_n[:,1]
                 if batched:
                     actions = actions[:,1:]
-                    states = s_t.reshape(pov.shape[0], -1, *s_t.shape[1:])[:,1:]
+                    starting_state = s_t.reshape(vec.shape[0], -1, *s_t.shape[1:])[:,t]
+                    h_0, c_0 = h_t[:,:,t], c_t[:,:,t]
                 else:
                     actions = actions[1:]
                     states = s_t[:,1:]
+                    h_0, c_0 = h_t[:,t], c_t[:,t]
+                
+                print(f'states.shape = {states.shape}')
+                (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs = self.extrapolate_latent(starting_state, actions, h_0, c_0, batched)
+                print(f's_mean.shape = {s_mean.shape}')
+                
+                
                 s_mean_list.append(s_mean)
                 s_logstd_list.append(s_logstd)
                 log_mix_coeffs_list.append(log_mix_coeffs)
         else:
-            (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs = self.forward_latent(states, actions, h_n, c_n, batched)
-            h_n, c_n = h_t[:,-1], c_t[:,-1]
+            (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs = self.forward_latent(states, actions, h_t, c_t, batched)
+            h_t, c_t = h_n[:,-1], c_n[:,-1]
             s_mean_list.append(s_mean)
             s_logstd_list.append(s_logstd)
             log_mix_coeffs_list.append(log_mix_coeffs)
-        return (s_mean_list, s_logstd_list), s_t, (h_n, c_n), log_mix_coeffs_list, target
-    
-    def forward_latent(self, states, actions, h0=None, c0=None, batched=False):
+
+        return (s_mean_list, s_logstd_list), s_t, (h_t, c_t), log_mix_coeffs_list, target
+   
+    def extrapolate_latent(self, state, actions, h0, c0, batched=False):
+        '''
+        Extrapolate from starting state conditional on actions and pre-existing lstm states
+        Args:
+            state - ([B], 64 + latent_dim)
+            actions - ([B], T', 64), where T' is the number of steps the function will extrapolate
+        '''
+        
+
+
+
+    def forward_latent(self, states, actions, h0=None, c0=None, batched=False, stepwise=False):
         '''
         Helper function which takes (a sample of the current belief over the) current state or a sequence thereof,
         the action taken in that state or states, as well as the current lstm state and computes a belief
@@ -190,6 +211,7 @@ class MDN_RNN(pl.LightningModule):
             h0 - ([B], lstm_kwargs['hidden_size'],)
             c0 - ([B], lstm_kwargs['hidden_size'],)
             batched - Bool, whether pov, vec, actions have a batch dimension before the time dimension
+            stepwise - Bool, whether to process input sequentially and store cell state after each time step
         Output:
             (s_mean, s_logstd) - belief over state, shape ([B] * T, num_components * (2 * latent_dim + action_dim))
             s_t -  sample from the above factorized normal distribution
@@ -204,10 +226,39 @@ class MDN_RNN(pl.LightningModule):
         
         # compute hidden states of lstm
         if h0 is None or c0 is None:
-            h_t, (h_n, c_n) = self.lstm(lstm_input)
+            if stepwise:
+                h_n_list = []
+                c_n_list = []
+                h_t, (h_n, c_n) = self.lstm(lstm_input[:,0,:][:,None,:])
+                h_n_list.append(h_n)
+                c_n_list.append(c_n)
+                for i in range(lstm_input.shape[1]):
+                    h_t, (h_n, c_n) = self.lstm(lstm_input[:,i+1,:][:,None,:], (h_n, c_n))
+                    h_n_list.append(h_n)
+                    c_n_list.append(c_n)
+                h_t = torch.stack(h_n_list, dim=1)
+                c_t = torch.stack(c_n_list, dim=1)
+            else:
+                h_t, (h_n, c_n) = self.lstm(lstm_input)
         else:
-            h_t, (h_n, c_n) = self.lstm(lstm_input, (h0,c0))
+            if stepwise:
+                h_n_list = []
+                c_n_list = []
+                h_t, (h_n, c_n) = self.lstm(lstm_input[:,0,:][:,None,:], (h0,c0))
+                h_n_list.append(h_n)
+                c_n_list.append(c_n)
+                for i in range(lstm_input.shape[1]):
+                    h_t, (h_n, c_n) = self.lstm(lstm_input[:,i+1,:][:,None,:], (h_n, c_n))
+                    h_n_list.append(h_n)
+                    c_n_list.append(c_n)
+                h_t = torch.stack(h_n_list, dim=1)
+                c_t = torch.stack(c_n_list, dim=1)
+            else:
+                h_t, (h_n, c_n) = self.lstm(lstm_input, (h0,c0))
         
+        #TODO LSTM doesn't give me cell states after each step, which I currently do need 
+        # in my forward step for the latent overshooting
+
         # merge h_t
         h_t = self.merge(h_t) 
         
