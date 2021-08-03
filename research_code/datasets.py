@@ -85,6 +85,61 @@ def get_data(env_name, num_samples=0, data_dir=None):
 
     return all_actions, all_pov_obs, all_vec_obs, all_rewards, all_traj_starts
 
+class RewardData(Dataset):
+
+    def __init__(self, env_name, data_dir, num_data=0, upsample=True, backfill=True, backfill_discount=0.99):
+        '''
+        Dataset to learn to predict reward given [pov_obs, vec_obs]
+        '''
+        super().__init__()
+
+        print(f'\nLoading data of {env_name} from {data_dir}..')
+
+        # load data
+        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
+        pov_obs, vec_obs, rewards, traj_starts = data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts']
+
+        if num_data > 0:
+            pov_obs = pov_obs[:num_data]
+            vec_obs = vec_obs[:num_data]
+            rewards = rewards[:num_data]
+            traj_starts = traj_starts[:num_data]
+
+        self.pov_obs = np.array(pov_obs)
+        self.vec_obs = np.array(vec_obs)
+        self.rewards = np.array(rewards)
+        self.traj_starts = np.array(traj_starts)
+
+        self.weights = np.ones_like(self.rewards)
+        num_non_zero_rew = len(self.rewards[self.rewards>0])
+        num_zero_rew = len(self.rewards) - num_non_zero_rew
+        print(f'Share of non-zero rewards = {num_non_zero_rew / len(self.rewards) * 100:.3f} %')
+        if backfill:
+            print('Backfilling... Upsampling will not be used!')
+            self.rewards = self.backfill(self.rewards, self.traj_starts, backfill_discount)
+        elif upsample:
+            # weights of non-zero rew should have same sum as weights of zero rew
+            self.weights[self.rewards > 0] = num_zero_rew / num_non_zero_rew
+        
+    def backfill(self, rew, starts, gamma):
+        for i in range(len(rew)-2, -1, -1):
+            if starts[i+1] == 1:
+                rew[i] = rew[i]
+            else:
+                rew[i] += gamma*rew[i+1]
+        return rew
+
+
+    def __len__(self):
+        return len(self.rewards)
+    
+    def __getitem__(self, idx):
+        # transform image to float array
+        pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
+
+        return pov, self.vec_obs[idx].astype(np.float32), self.rewards[idx].astype(np.float32)
+
+
 class VAEData(Dataset):
 
     def __init__(self, env_name, data_dir, num_data=0):

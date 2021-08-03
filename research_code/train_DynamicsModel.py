@@ -27,7 +27,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         val_perc, eval_freq, batch_size, num_data, epochs, 
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, num_components, temp, skip_connection,
-                        val_check_interval):
+                        val_check_interval, load_from_checkpoint, version_dir):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
@@ -86,7 +86,13 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     ##
 
     # init model
-    model = STR_TO_MODEL[dynamics_model](**model_kwargs)
+    if load_from_checkpoint:
+        checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
+        
+        print(f'Loading model from {checkpoint}')
+        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, lr=lr)
+    else:
+        model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
     data = datasets.DynamicsData(env_name, data_dir, seq_len, num_data)
@@ -139,6 +145,8 @@ if __name__=='__main__':
     parser.add_argument('--temp', type=float, default=1, help='Temperature parameter for gumbel softmax in MDN-RNN.')
     parser.add_argument('--skip_connection', type=bool, default=True, help='Whether to use skip connection in MDN-RNN.')
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
+    parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
+    parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())
 

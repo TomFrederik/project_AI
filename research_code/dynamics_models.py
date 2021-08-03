@@ -77,16 +77,19 @@ class MDN_RNN(pl.LightningModule):
         # chunk s_mean and s_logstd into the different comps
         s_means = torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=-1), dim=1)
         #print(f's_means.shape = {s_means.shape}')
+        #print(f'target-mu.shape = {(target[:,None,:] - s_means).shape}')
         s_logstds = torch.stack(torch.chunk(s_logstd, chunks=self.num_components, dim=-1), dim=1)
-        #print(f'Stds = {torch.exp(s_logstds).mean(dim=0)}')
+        #print(f's_logstds.shape = {s_logstds.shape}')
+        print(f'{self.global_step+1}: Mean Stds = {torch.exp(s_logstds).mean(dim=0)}')
         # get log likelihood of target under distributions
-        # add EPS to std for stability
-        logp = -0.5 * ((target[:,None,:] - s_means) / (torch.exp(s_logstds) + EPS)) ** 2 - s_logstds - torch.log(torch.tensor(2*np.pi))
+        logp = -0.5 * (((target[:,None,:] - s_means) / torch.exp(s_logstds)) ** 2).sum(dim=-1) - s_logstds.sum(dim=-1)
+        # check if correct --> seems correct
+        #logp2 = torch.nn.GaussianNLLLoss(reduction='none')((target[:,None,:] - s_means)+s_means, s_means, torch.exp(s_logstds)**2).sum(dim=-1)
         #print(f'logp = {logp}')
-        #print(f'logp.shape = {logp.shape}')
+        #print(f'logp2 = {logp2}')
         #print(f'exp(log_mix_coeffs) = {torch.exp(log_mix_coeffs)}')
         #print(f'log_mix_coeffs == 0? {log_mix_coeffs[log_mix_coeffs == 0]}')
-        loss = -torch.logsumexp(log_mix_coeffs[...,None] + logp , dim=1).mean()
+        loss = -torch.logsumexp(log_mix_coeffs + logp , dim=1).mean()
         #print(f'loss.shape = {loss.shape}')
         #print(f'loss = {loss}')
         
@@ -443,14 +446,19 @@ class RSSM(pl.LightningModule):
         # so for now we comput KL(pred(z) || enc(o))
         # specifically, the predicted std is ~1 oom too large in the KL(enc|pred) case, resulting in
         # very wild extrapolations
-        kld = self._compute_kl((predicted_z_mean, predicted_z_std), (pov_mean, pov_std))
+        #kld = self._compute_kl((predicted_z_mean, predicted_z_std), (pov_mean, pov_std))
+        # Since we are currently training the modules seperately, the pov_mean is not trainable
+        # so that the gradient of the KL is the same as the gradient of the following negative log-likelihood:
+        # TODO use pov_sample instead of pov_mean
+        z_loss = 0.5 * ((predicted_z_mean - pov_mean) / predicted_z_std) ** 2 + torch.log(predicted_z_std)
+        z_loss = z_loss.sum(dim=1) 
         #print(f'mean true z std = {pov_std.mean()}')
         #print(f'mean predicted z std = {predicted_z_std.mean()}')
         #print(f'mse std = {self.split_cut((pov_std-predicted_z_std)**2).sum(dim=1).mean()}')
         
         # sum up all losses, split them into frames, sum over frames and average over batch
         v_loss = self.split_cut(v_loss).sum(dim=2).mean() #sum over 2 in deterministic case, since we didn't reduce over the feature dim
-        z_loss = self.split_cut(kld).mean()
+        z_loss = self.split_cut(z_loss).mean()
         #print(f'kld = {z_loss}')
         r_loss = self.split_cut(mse_r).mean()
         #print(f'z_loss = {z_loss}')

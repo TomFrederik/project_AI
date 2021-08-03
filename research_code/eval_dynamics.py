@@ -37,8 +37,8 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     traj_iter = env.load_data(traj)
 
     # pick some frame
-    idx = 50
-    num_steps = 50
+    idx = 100
+    num_steps = 100
 
     if model_class == 'node':
         # overwrite model timesteps
