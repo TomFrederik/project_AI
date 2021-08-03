@@ -27,7 +27,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         val_perc, eval_freq, batch_size, num_data, epochs, 
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, num_components, temp, skip_connection,
-                        val_check_interval, load_from_checkpoint, version_dir):
+                        val_check_interval, load_from_checkpoint, version_dir,
+                        latent_overshooting):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
@@ -63,7 +64,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'VAE_path':model_path,
             'optim_kwargs':optim_kwargs,
             'scheduler_kwargs':scheduler_kwargs,
-            'VAE_class':VAE_class
+            'VAE_class':VAE_class,
+            'latent_overshooting':latent_overshooting
         }
         monitor = 'Validation/loss'
     elif dynamics_model == 'mdn':
@@ -78,7 +80,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'VAE_class':VAE_class,
             'num_components':num_components,
             'temp':temp,
-            'skip_connection':skip_connection
+            'skip_connection':skip_connection,
+            'latent_overshooting':latent_overshooting
         }
         monitor = 'Validation/loss'
     else:
@@ -143,9 +146,10 @@ if __name__=='__main__':
     parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet'])
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
     parser.add_argument('--temp', type=float, default=1, help='Temperature parameter for gumbel softmax in MDN-RNN.')
-    parser.add_argument('--skip_connection', type=bool, default=True, help='Whether to use skip connection in MDN-RNN.')
+    parser.add_argument('--skip_connection', action='store_true', help='Whether to use skip connection in MDN-RNN.')
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
-    parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
+    parser.add_argument('--load_from_checkpoint', action='store_true')
+    parser.add_argument('--latent_overshooting', action='store_true')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())

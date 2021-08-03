@@ -6,9 +6,17 @@ import minerl
 import numpy as np
 from pyvirtualdisplay import Display
 
-import dynamics_models
+import research_code.dynamics_models as dynamics_models
+import research_code.reward_model as reward_model
 
 from gym.wrappers import Monitor
+
+STR_TO_CLASS = {
+    'mdn': dynamics_models.MDNRNNReward,
+    'rssm': dynamics_models.RSSM
+}
+
+
 
 class PlaNetExperiment():
 
@@ -78,20 +86,22 @@ class PlaNetExperiment():
             actions = torch.stack(act_list, dim=0)
             
             # compute belief over state, i.e. encode via VAE
-            all_z_mean, all_z_std, all_z_samples = self.planet.rssm.VAE.encode_only(pov)
+            all_z_mean, all_z_std, all_z_samples = self.planet.model.VAE.encode_only(pov)
             
             
             # construct belief. Since vec is given, it has zero std
             s_mean = torch.cat([all_z_mean, vec], dim=1)
             s_std = torch.cat([all_z_std, torch.zeros_like(vec)], dim=1)
             s_samples = torch.cat([all_z_samples, vec], dim=1)
-
-            (s_mean, s_std), s_t, r_t, (h_n, c_n) = self.planet.rssm.forward_latent(s_samples, actions, h_n, c_n, batched=False)
+            
+            if self.planet.model_class == 'rssm':
+                (s_mean, s_std), s_t, r_t, (h_n, c_n) = self.planet.model.forward_latent(s_samples, actions, h_n, c_n, batched=False)
+            elif self.planet.model_class == 'mdn':
+                s_t, r_t, (h_n, c_n) = self.planet.model.forward(s_samples, actions, h_n, c_n, batched=False)
             
             # plan from current state
             action = self.planet(s_mean[-1], s_std[-1], h_n, c_n)
 
-            
             # apply noise
             action += np.random.normal(loc=0, scale=self.exploration_noise, size=action.shape)
             action = {'vector': action}
@@ -103,9 +113,13 @@ class PlaNet(nn.Module):
     '''
     Adapted from https://arxiv.org/pdf/1811.04551.pdf
     '''
-    def __init__(self, rssm_path, max_opt_iter, num_act_sequences, planning_horizon, top_k, use_clusters=False, centroids_path='./'):
+    def __init__(self, model_path, model_class, max_opt_iter, num_act_sequences, planning_horizon, top_k, use_clusters=False, centroids_path='./', reward_model_path=None):
         super().__init__()
-        self.rssm = dynamics_models.RSSM.load_from_checkpoint(rssm_path)
+        self.model_class = model_class
+        if self.model_class == 'rssm':
+            self.model = STR_TO_CLASS[model_class].load_from_checkpoint(model_path)
+        elif self.model_class == 'mdn':
+            self.model = dynamics_models.MDNRNNReward(model_path, reward_model_path)
         self.action_dim = 64
         self.max_opt_iter = max_opt_iter
         self.num_act_sequences = num_act_sequences
@@ -162,8 +176,11 @@ class PlaNet(nn.Module):
             cur_state = cur_state[:,None,:]
 
             #
-            (s_mean, s_std), cur_state, r_t, (h_n, c_n) = self.rssm.forward_latent(cur_state, cur_action, h_n, c_n, batched=True)
-
+            if self.model_class == 'rssm':
+                (s_mean, s_std), cur_state, r_t, (h_n, c_n) = self.model.forward_latent(cur_state, cur_action, h_n, c_n, batched=True)
+            elif self.model_class == 'mdn':
+                cur_state, r_t, (h_n, c_n) = self.model(cur_state, cur_action, h_n, c_n, batched=True)
+            
             #
             reward_sequence.append(r_t)
             state_sequence.append(cur_state)

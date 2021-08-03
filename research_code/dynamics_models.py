@@ -3,10 +3,10 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
 import torchdiffeq as teq
-import utils
 
-import visual_models
-import util_models
+import research_code.visual_models as visual_models
+import research_code.util_models as util_models
+from research_code.reward_model import RewardMLP
 
 vae_model_by_str = {
     'Conv':visual_models.ConvVAE,
@@ -15,8 +15,22 @@ vae_model_by_str = {
 
 EPS = 1e-10
 
+
+class MDNRNNReward(nn.Module):
+    def __init__(self, mdn_path, reward_path):
+        super().__init__()
+        self.mdn = MDN_RNN.load_from_checkpoint(mdn_path)
+        self.reward_model = RewardMLP.load_from_checkpoint(reward_path)
+    
+    def forward(self, state, action, h_n, c_n, batched=True):
+        _, state, (h_n, c_n), _, _ = self.mdn.forward_latent(state, action, h_n, c_n, batched)
+        rew = self.reward_model(state[...,-64:])
+        return state, rew, (h_n, c_n)
+        
 class MDN_RNN(pl.LightningModule):
-    def __init__(self, lstm_kwargs, optim_kwargs, scheduler_kwargs, seq_len, num_components, VAE_path, temp=1, VAE_class='Conv', skip_connection=True):
+    def __init__(self, lstm_kwargs, optim_kwargs, scheduler_kwargs, 
+                 seq_len, num_components, VAE_path, temp=1, 
+                 VAE_class='Conv', skip_connection=True, latent_overshooting=False):
         super().__init__()
         
         # save params
@@ -27,19 +41,11 @@ class MDN_RNN(pl.LightningModule):
         self.VAE.eval()
         self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
 
-        # save some vars
-        self.scheduler_kwargs = scheduler_kwargs
-        self.optim_kwargs = optim_kwargs
-        self.seq_len = seq_len
-        self.num_components = num_components
-        self.temp = temp
-        self.skip_connection = skip_connection
-
         # set up model
         self.mse_loss = nn.MSELoss(reduction='none')
         self.merge = util_models.MergeFramesWithBatch()
-        self.split = util_models.SplitFramesFromBatch(self.seq_len)
-        self.split_cut = util_models.SplitFramesFromBatch(self.seq_len-1)
+        self.split = util_models.SplitFramesFromBatch(self.hparams.seq_len)
+        self.split_cut = util_models.SplitFramesFromBatch(self.hparams.seq_len-1)
         lstm_input_dim = self.latent_dim + 128 # s_t-1, a_t-1,  where s_t = [z_t, v_t]
         self.lstm = nn.LSTM(**lstm_kwargs, input_size=lstm_input_dim, batch_first=True)
         self.mdn_network = nn.Sequential(
@@ -47,7 +53,7 @@ class MDN_RNN(pl.LightningModule):
                                             nn.ReLU(), 
                                             nn.Linear(1024, 1024),
                                             nn.ReLU(),
-                                            nn.Linear(1024, self.num_components + self.num_components * 2 * (self.latent_dim + 64))
+                                            nn.Linear(1024, self.hparams.num_components + self.hparams.num_components * 2 * (self.latent_dim + 64))
                                         ) # first num_component outputs determine the mixing coeffs, the rest parameterize the gaussians
 
 
@@ -56,49 +62,61 @@ class MDN_RNN(pl.LightningModule):
         pov, vec, actions, _ = batch
 
         # predict distribution over next state and sample
-        (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, target = self(pov, vec, actions, batched=True)
+        (s_mean_list, s_logstd_list), _, _, log_mix_coeffs_list, target = self(pov, vec, actions, batched=True, latent_overshooting=self.hparams.latent_overshooting)
+        
+        # Compute loss over all time horizons
+        loss = 0
+        T = self.hparams.seq_len-1 if self.latent_overshooting else 1
+        for t in range(T):
+            print(f't = {t}')
+            # extract from list
+            s_mean = s_mean_list[t]
+            print(f's_mean.shape = {s_mean.shape}')
+            s_logstd = s_logstd_list[t]
+            log_mix_coeffs = log_mix_coeffs_list[t]
+            cur_target = target[:,1+t:]
+            print(f'cur_target.shape = {cur_target.shape}')
 
-        # extract distributions from the tensors
+            # merge target
+            cur_target = self.merge(cur_target)
+            
+            # cut off last prediction since it can't be scored
+            # also cut off first target since it was not predicted
+            s_mean = self.merge(self.split(s_mean)[:,:-1,:])
+            print(f's_mean.shape = {s_mean.shape}')
+            #print(f's_mean = {s_mean}')
+            s_logstd = self.merge(self.split(s_logstd)[:,:-1,:])
+            #print(f's_logstd = {s_logstd}')
+            log_mix_coeffs = self.merge(self.split(log_mix_coeffs)[:,:-1,:])
+            #print(f'log_mix_coeffs = {log_mix_coeffs}')
+            print(f'log_mix_coeffs.shape = {log_mix_coeffs.shape}')
+            #print(f'log_mix_coeffs = {log_mix_coeffs}')
 
-        # cut off last prediction since it can't be scored
-        # also cut off first target since it was not predicted
-        s_mean = self.merge(self.split(s_mean)[:,:-1,:])
-        #print(f's_mean.shape = {s_mean.shape}')
-        #print(f's_mean = {s_mean}')
-        s_logstd = self.merge(self.split(s_logstd)[:,:-1,:])
-        #print(f's_logstd = {s_logstd}')
-        log_mix_coeffs = self.merge(self.split(log_mix_coeffs)[:,:-1,:])
-        #print(f'log_mix_coeffs = {log_mix_coeffs}')
-        target = self.merge(target[:,1:,:])
-        #print(f'target.shape = {target.shape}')
-        #print(f'log_mix_coeffs.shape = {log_mix_coeffs.shape}')
-        #print(f'log_mix_coeffs = {log_mix_coeffs}')
-
-        # chunk s_mean and s_logstd into the different comps
-        s_means = torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=-1), dim=1)
-        #print(f's_means.shape = {s_means.shape}')
-        #print(f'target-mu.shape = {(target[:,None,:] - s_means).shape}')
-        s_logstds = torch.stack(torch.chunk(s_logstd, chunks=self.num_components, dim=-1), dim=1)
-        #print(f's_logstds.shape = {s_logstds.shape}')
-        print(f'{self.global_step+1}: Mean Stds = {torch.exp(s_logstds).mean(dim=0)}')
-        # get log likelihood of target under distributions
-        logp = -0.5 * (((target[:,None,:] - s_means) / torch.exp(s_logstds)) ** 2).sum(dim=-1) - s_logstds.sum(dim=-1)
-        # check if correct --> seems correct
-        #logp2 = torch.nn.GaussianNLLLoss(reduction='none')((target[:,None,:] - s_means)+s_means, s_means, torch.exp(s_logstds)**2).sum(dim=-1)
-        #print(f'logp = {logp}')
-        #print(f'logp2 = {logp2}')
-        #print(f'exp(log_mix_coeffs) = {torch.exp(log_mix_coeffs)}')
-        #print(f'log_mix_coeffs == 0? {log_mix_coeffs[log_mix_coeffs == 0]}')
-        loss = -torch.logsumexp(log_mix_coeffs + logp , dim=1).mean()
-        #print(f'loss.shape = {loss.shape}')
-        #print(f'loss = {loss}')
+            # chunk s_mean and s_logstd into the different comps
+            s_means = torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=-1), dim=1)
+            #print(f's_means.shape = {s_means.shape}')
+            #print(f'target-mu.shape = {(target[:,None,:] - s_means).shape}')
+            s_logstds = torch.stack(torch.chunk(s_logstd, chunks=self.hparams.num_components, dim=-1), dim=1)
+            #print(f's_logstds.shape = {s_logstds.shape}')
+            #print(f'{self.global_step+1}: Mean Stds = {torch.exp(s_logstds).mean(dim=0)}')
+            # get log likelihood of target under distributions
+            logp = -0.5 * (((cur_target[:,None,:] - s_means) / torch.exp(s_logstds)) ** 2).sum(dim=-1) - s_logstds.sum(dim=-1)
+            # check if correct --> seems correct
+            #logp2 = torch.nn.GaussianNLLLoss(reduction='none')((target[:,None,:] - s_means)+s_means, s_means, torch.exp(s_logstds)**2).sum(dim=-1)
+            #print(f'logp = {logp}')
+            #print(f'logp2 = {logp2}')
+            #print(f'exp(log_mix_coeffs) = {torch.exp(log_mix_coeffs)}')
+            #print(f'log_mix_coeffs == 0? {log_mix_coeffs[log_mix_coeffs == 0]}')
+            loss += -torch.logsumexp(log_mix_coeffs + logp , dim=1).mean()
+            #print(f'loss.shape = {loss.shape}')
+            #print(f'loss = {loss}')
         
         return loss
 
-    def forward(self, pov, vec, actions, h0=None, c0=None, batched=False):
+    def forward(self, pov, vec, actions, h0=None, c0=None, batched=False, latent_overshooting=False):
         '''
-        Given the last state, latest obs and taken action, this function computes 
-        the belief over the next state, as well as predicts the reward.
+        Given a sequence of pov, vec and actions, computes priors over next latent
+        state.
         Inputs:
             pov - ([B], T, 3, 64, 64)
             vec - ([B], T, 64)
@@ -107,12 +125,15 @@ class MDN_RNN(pl.LightningModule):
             c0 - ([B], lstm_kwargs['hidden_size'],)
             batched - Bool, whether pov, vec, actions have a batch dimension before the time dimension
         Output:
-            (s_mean, s_logstd) - belief over state, shape ([B] * T, latent_dim + vec_dim)
-            s_t -  sample from the above factorized normal distribution
-            (h_n, c_n) - last hidden and cell state of the lstm
-            log_mix_coeffs - log of mixing coefficients, ([B] * T, num_components)
+            (s_mean_list, s_logstd_list) - lists of belief over state, shape ([B] * T, latent_dim + vec_dim)
+            s_t -  sample from the above factorized normal distribution #TODO fix so that list is returned
+            (h_n, c_n) - last hidden and cell state of the lstm #TODO fix so that list is returned
+            log_mix_coeffs_list - list of log of mixing coefficients, ([B] * T, num_components)
             target - ([B], T, latent_dim + vec_dim) sample of ground truth encoding
         '''
+        
+        h_n, c_n = h0, c0
+        
         if batched:
             # merge frames with batch
             pov = self.merge(pov)
@@ -124,22 +145,45 @@ class MDN_RNN(pl.LightningModule):
         if batched:
             # split frames from batch again
             pov_sample = self.split(pov_sample)
-
+        
         # construct state sample
-        states = torch.cat([pov_sample, vec], dim=2 if batched else 1)
-
-        (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, _ = self.forward_latent(states, actions, h0, c0, batched)     
-
+        states = torch.cat([pov_sample, vec], dim=2 if batched else 1) # ([B], T, 192)
+        
         # stack pov and vec to construct target
         target = torch.cat([pov_sample, vec], dim=-1)   
         
-        return (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, target
+        # latent overshooting
+        s_mean_list = []
+        s_logstd_list = []
+        log_mix_coeffs_list = []
+        if latent_overshooting:
+            for t in range(self.hparams.seq_len-1):
+                print(f'states.shape = {states.shape}')
+                (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs = self.forward_latent(states, actions, h_n, c_n, batched)
+                print(f's_mean.shape = {s_mean.shape}')
+                h_n, c_n = h_t[:,1], c_n[:,1]
+                if batched:
+                    actions = actions[:,1:]
+                    states = s_t.reshape(pov.shape[0], -1, *s_t.shape[1:])[:,1:]
+                else:
+                    actions = actions[1:]
+                    states = s_t[:,1:]
+                s_mean_list.append(s_mean)
+                s_logstd_list.append(s_logstd)
+                log_mix_coeffs_list.append(log_mix_coeffs)
+        else:
+            (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs = self.forward_latent(states, actions, h_n, c_n, batched)
+            h_n, c_n = h_t[:,-1], c_t[:,-1]
+            s_mean_list.append(s_mean)
+            s_logstd_list.append(s_logstd)
+            log_mix_coeffs_list.append(log_mix_coeffs)
+        return (s_mean_list, s_logstd_list), s_t, (h_n, c_n), log_mix_coeffs_list, target
     
     def forward_latent(self, states, actions, h0=None, c0=None, batched=False):
         '''
-        Helper function which takes (a sample of the current belief over the) current state or a sequence thereof
-        as well as the action taken in that state or states, as well as the current lstm state and computes a belief
-        over the next state as well as a prediction of the reward
+        Helper function which takes (a sample of the current belief over the) current state or a sequence thereof,
+        the action taken in that state or states, as well as the current lstm state and computes a belief
+        over the next state
         Input:
             states - ([B], T, 64 + latent_dim)
             actions - ([B], T, 64)
@@ -147,9 +191,9 @@ class MDN_RNN(pl.LightningModule):
             c0 - ([B], lstm_kwargs['hidden_size'],)
             batched - Bool, whether pov, vec, actions have a batch dimension before the time dimension
         Output:
-            (s_mean, s_logstd) - belief over state, shape ([B] * T, 2 * latent_dim + action_dim)
+            (s_mean, s_logstd) - belief over state, shape ([B] * T, num_components * (2 * latent_dim + action_dim))
             s_t -  sample from the above factorized normal distribution
-            (h_n, c_n) - last hidden and cell state of the lstm
+            (h_t, c_t) - hidden and cell state of the lstm after each time step
             log_mix_coeffs - log of mixing coefficients, ([B] * T, num_components)
         '''
         # concat states and action
@@ -166,19 +210,18 @@ class MDN_RNN(pl.LightningModule):
         
         # merge h_t
         h_t = self.merge(h_t) 
-
+        
         # compute next state
         mdn_out = self.mdn_network(h_t) 
-        log_mix_coeffs = torch.log(torch.nn.functional.gumbel_softmax(mdn_out[:,:self.num_components], tau=self.temp, dim=-1))
-        s_mean, s_logstd = torch.chunk(mdn_out[...,self.num_components:], chunks=2, dim=-1)
+        log_mix_coeffs = torch.log(torch.nn.functional.gumbel_softmax(mdn_out[:,:self.hparams.num_components], tau=self.hparams.temp, dim=-1))
+        s_mean, s_logstd = torch.chunk(mdn_out[...,self.hparams.num_components:], chunks=2, dim=-1)
 
         # skip connection for the mean to bias it towards no change
-        if self.skip_connection:
+        if self.hparams.skip_connection:
             if batched and len(states.shape) == 3:
-                s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=1), dim=1) + self.merge(states)[:,None,:], start_dim=1, end_dim=-1)
+                s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=1), dim=1) + self.merge(states)[:,None,:], start_dim=1, end_dim=-1)
             elif not batched and len(states.shape) == 2:
-                s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=1), dim=1) + states[:,None,:], start_dim=1, end_dim=-1)
-
+                s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=1), dim=1) + states[:,None,:], start_dim=1, end_dim=-1)
             else:
                 raise ValueError(f'Unexpected error: batched = {batched} but len(states.shape) = {len(states.shape)} ({states.shape}) ')
         
@@ -188,13 +231,13 @@ class MDN_RNN(pl.LightningModule):
         comp_t = torch.distributions.categorical.Categorical(logits=log_mix_coeffs).sample().long()
         #print(f'comp_t.shape = {comp_t.shape}')
         #print(f'comp_t = {comp_t}')
-        mean = torch.stack(torch.chunk(s_mean, chunks=self.num_components, dim=-1), dim=0)[comp_t, torch.arange(len(comp_t)), ...]
+        mean = torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=-1), dim=0)[comp_t, torch.arange(len(comp_t)), ...]
         #print(mean.shape)
-        std = torch.exp(torch.stack((torch.chunk(s_logstd, chunks=self.num_components, dim=-1)), dim=0))[comp_t, torch.arange(len(comp_t)), ...]
+        std = torch.exp(torch.stack((torch.chunk(s_logstd, chunks=self.hparams.num_components, dim=-1)), dim=0))[comp_t, torch.arange(len(comp_t)), ...]
         s_t =  mean + std * torch.normal(torch.zeros_like(mean), torch.ones_like(std))
         #print(f'std.shape = {std.shape}')
 
-        return (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs, mean
+        return (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs
     
     @torch.no_grad()
     def predict_recursively(self, states, actions, horizon):
@@ -247,13 +290,13 @@ class MDN_RNN(pl.LightningModule):
     
     def configure_optimizers(self):
         # set up optimizer
-        optimizer = torch.optim.Adam(self.parameters(), **self.optim_kwargs)
+        optimizer = torch.optim.Adam(self.parameters(), **self.hparams.optim_kwargs)
         # set up scheduler
-        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.scheduler_kwargs['lr_gamma'])
+        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])
         lr_dict = {
             'scheduler': lr_scheduler,
-            'interval': self.scheduler_kwargs['lr_step_mode'],
-            'frequency': self.scheduler_kwargs['lr_decrease_freq'],
+            'interval': self.hparams.scheduler_kwargs['lr_step_mode'],
+            'frequency': self.hparams.scheduler_kwargs['lr_decrease_freq'],
         }
         return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
 
@@ -276,12 +319,14 @@ class RSSM(pl.LightningModule):
             self.VAE.eval()
             self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
         else:
+            raise NotImplementedError()
+            '''
             # init new VAE
             if VAE_kwargs == None:
                 raise ValueError('Need to specify VAE kwargs ')
             self.VAE = vae_model_by_str[VAE_class](**VAE_kwargs)
             self.latent_dim = VAE_kwargs['latent_dim']
-        
+            '''
         # save some vars
         self.scheduler_kwargs = scheduler_kwargs
         self.optim_kwargs = optim_kwargs
