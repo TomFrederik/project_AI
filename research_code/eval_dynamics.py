@@ -74,7 +74,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     else:
         raise NotImplementedError    
     
-    '''
+    
     # decode again into images:
     pred_pov = model.VAE.decode_only(pred_pov.squeeze())
 
@@ -87,24 +87,25 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
      
     size = images[0].transpose(1,0,2).shape[:-1]
 
-
     out = cv2.VideoWriter(os.path.join(save_path,'dynamics_imgs',f'{model_class}_dynamics.mp4'),cv2.VideoWriter_fourcc(*'mp4v'), 25, size)
 
     for i in range(len(images)):
-        # plt.figure()
-        # plt.imshow(images[i][...,[2,1,0]])
-        # plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_{i}.png'))
-        # plt.close()
         out.write(images[i])
     out.release()
-    '''
+    
     
     # plot difference between predicted and true vector obs
     fig = plt.figure()
-    plt.plot((pred_vec[0] - following_vecs[0]).detach().cpu().numpy())
+    ax = plt.axes()
+    ydata = (pred_vec[0] - following_vecs[0]).detach().cpu().numpy()
+    ydata.sort()
+    plot = ax.plot(ydata)[0]
     
     def animate(i):
-        fig.set_ydata((pred_vec[i] - following_vecs[i]).detach().cpu().numpy())
+        ydata = (pred_vec[i] - following_vecs[i]).detach().cpu().numpy()
+        ydata.sort()
+        plot.set_ydata(ydata)
+        ax.set_ylim(ydata.min(), ydata.max())
     
     anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
  

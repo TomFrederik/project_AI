@@ -309,6 +309,7 @@ class MDN_RNN(pl.LightningModule):
                 c_t = torch.stack(c_n_list, dim=1)
             else:
                 h_t, (h_n, c_n) = self.lstm(lstm_input)
+                c_t = c_n
         else:
             if stepwise:
                 h_n_list = []
@@ -324,6 +325,7 @@ class MDN_RNN(pl.LightningModule):
                 c_t = torch.stack(c_n_list, dim=1)
             else:
                 h_t, (h_n, c_n) = self.lstm(lstm_input, (h0,c0))
+                c_t = c_n
         
         # merge h_t
         h_t = self.merge(h_t) 
@@ -369,20 +371,21 @@ class MDN_RNN(pl.LightningModule):
         '''
         assert horizon > 0, f"horizon must be greater 0, but is {horizon}!"
 
-        _, s_t, (h_n, c_n), _, mean = self.forward_latent(states, actions[:-horizon], h0=None, c0=None, batched=False)
+        _, s_t, (h_n, c_n), _ = self.forward_latent(states, actions[:-horizon], h0=None, c0=None, batched=False)
+        h_n = h_n[-1][None,None,:]
 
         state_list = []
         for t in range(horizon):
             # get last state and action
             s_t = s_t[-1][None,:]
-            #s_t = mean[-1][None,:]
             action = actions[-horizon+t][None,:]
             
             # save state
             state_list.append(s_t)  
 
             # sample next state
-            _, s_t, (h_n, c_n), _, mean = self.forward_latent(s_t, action, h0=h_n, c0=h_n, batched=False)
+            _, s_t, (h_n, c_n), _= self.forward_latent(s_t, action, h0=h_n, c0=h_n, batched=False)
+            h_n = h_n[None,...]
 
         # concat states
         predicted_states = torch.cat(state_list, dim=0)
