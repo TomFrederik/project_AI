@@ -171,15 +171,16 @@ class MDN_RNN(pl.LightningModule):
                     actions = actions[1:]
                     states = s_t[:,1:]
                     h_0, c_0 = h_t[:,t], c_t[:,t]
+                print(f'h_0.shape = {h_0.shape}')
+                print(f'starting_state.shape = {starting_state.shape}')
+                print(f'actions.shape = {actions.shape}')
+                extrapolated_means, extrapolated_logstds, extrapolated_log_coeffs = self.extrapolate_latent(starting_state, actions, h_0, c_0, batched)
+                print(f'extrapolated_means.shape = {extrapolated_means.shape}')
                 
-                print(f'states.shape = {states.shape}')
-                (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs = self.extrapolate_latent(starting_state, actions, h_0, c_0, batched)
-                print(f's_mean.shape = {s_mean.shape}')
-                
-                
-                s_mean_list.append(s_mean)
-                s_logstd_list.append(s_logstd)
-                log_mix_coeffs_list.append(log_mix_coeffs)
+                # TODO make this work properly, i.e. respect proper order of the states
+                s_mean_list.append(extrapolated_means)
+                s_logstd_list.append(extrapolated_logstds)
+                log_mix_coeffs_list.append(extrapolated_log_coeffs)
         else:
             (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs = self.forward_latent(states, actions, h_t, c_t, batched)
             h_t, c_t = h_n[:,-1], c_n[:,-1]
@@ -189,17 +190,85 @@ class MDN_RNN(pl.LightningModule):
 
         return (s_mean_list, s_logstd_list), s_t, (h_t, c_t), log_mix_coeffs_list, target
    
-    def extrapolate_latent(self, state, actions, h0, c0, batched=False):
+    def extrapolate_latent(self, state, actions, h0=None, c0=None, batched=False):
         '''
         Extrapolate from starting state conditional on actions and pre-existing lstm states
         Args:
             state - ([B], 64 + latent_dim)
             actions - ([B], T', 64), where T' is the number of steps the function will extrapolate
+        Returns:
+            extrapolated_means - ([B], T', 64 + latent_dim)
+            extrapolated_logstds - ([B], T', 64 + latent_dim)
         '''
+        h_n = h0
+        c_n = c0
         
+        if batched:
+            steps = actions.shape[1]
+            concat_dim = 2
+        else:
+            steps = actions.shape[0]
+            concat_dim = 1
+        
+        extrapolated_means = []
+        extrapolated_logstds = []
+        extrapolated_log_coeffs = []
+        
+        for t in range(steps):
+            if batched:
+                state = state[:,None,:]
+                action = actions[:,t][:,None,:]
+            else:
+                state = state[None,:]
+                action = actions[:,t][None,:]
+            
+            lstm_input = torch.cat([state, action], dim=concat_dim)
+            if batched:
+                lstm_input = lstm_input[None,...]
+            h_t, (h_n, c_n) = self.lstm(lstm_input, (h_n, c_n))
+            
+            # merge h_t
+            if batched:
+                h_t = h_t[:,0]
+            else:
+                pass
+            print(f'h_t.shape = {h_t.shape}')
+            
+            # compute next state
+            mdn_out = self.mdn_network(h_t) 
+            log_mix_coeffs = torch.log(torch.nn.functional.gumbel_softmax(mdn_out[:,:self.hparams.num_components], tau=self.hparams.temp, dim=-1))
+            s_mean, s_logstd = torch.chunk(mdn_out[...,self.hparams.num_components:], chunks=2, dim=-1)
 
-
-
+            # skip connection for the mean to bias it towards no change
+            if self.hparams.skip_connection:
+                if batched and len(state.shape) == 3:
+                    s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=1), dim=1) + self.merge(state)[:,None,:], start_dim=1, end_dim=-1)
+                elif not batched and len(state.shape) == 2:
+                    s_mean = torch.flatten(torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=1), dim=1) + state[:,None,:], start_dim=1, end_dim=-1)
+                else:
+                    raise ValueError(f'Unexpected error: batched = {batched} but len(state.shape) = {len(state.shape)} ({state.shape}) ')
+            
+            # sample from the mixture of multi-dim gaussians parameterized by h_t
+            #print(log_mix_coeffs)
+            #print(log_mix_coeffs.shape)
+            comp_t = torch.distributions.categorical.Categorical(logits=log_mix_coeffs).sample().long()
+            #print(f'comp_t.shape = {comp_t.shape}')
+            #print(f'comp_t = {comp_t}')
+            mean = torch.stack(torch.chunk(s_mean, chunks=self.hparams.num_components, dim=-1), dim=0)[comp_t, torch.arange(len(comp_t)), ...]
+            #print(mean.shape)
+            std = torch.exp(torch.stack((torch.chunk(s_logstd, chunks=self.hparams.num_components, dim=-1)), dim=0))[comp_t, torch.arange(len(comp_t)), ...]
+            state =  mean + std * torch.normal(torch.zeros_like(mean), torch.ones_like(std))
+            
+            extrapolated_means.append(s_mean)
+            extrapolated_logstds.append(s_logstd)
+            extrapolated_log_coeffs.append(log_mix_coeffs)
+        
+        extrapolated_means = torch.stack(extrapolated_means, dim=1)
+        extrapolated_logstds = torch.stack(extrapolated_logstds, dim=1)
+        extrapolated_log_coeffs = torch.stack(extrapolated_log_coeffs, dim=1)
+        print(f'extrapolated_states.shape = {extrapolated_means.shape}')
+        return extrapolated_means, extrapolated_logstds, extrapolated_log_coeffs
+            
     def forward_latent(self, states, actions, h0=None, c0=None, batched=False, stepwise=False):
         '''
         Helper function which takes (a sample of the current belief over the) current state or a sequence thereof,
@@ -256,9 +325,6 @@ class MDN_RNN(pl.LightningModule):
             else:
                 h_t, (h_n, c_n) = self.lstm(lstm_input, (h0,c0))
         
-        #TODO LSTM doesn't give me cell states after each step, which I currently do need 
-        # in my forward step for the latent overshooting
-
         # merge h_t
         h_t = self.merge(h_t) 
         

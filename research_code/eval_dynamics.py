@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 import os
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 import torchvision as tv
 
 
@@ -56,8 +57,8 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     actions = torch.cat([act, following_acts], dim=0)
 
     following_povs = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[0] for i in range(num_steps)], dim=0)
+    following_vecs = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[1] for i in range(num_steps)], dim=0)
 
-    
 
     # encode pov
     enc_pov = model.VAE.encode_only(pov)[2]
@@ -69,16 +70,14 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     if model_class in ['rssm', 'mdn']:
         predicted_states = model.predict_recursively(states, actions, horizon=num_steps)
         pred_pov = predicted_states[:, :128]
+        pred_vec = predicted_states[:, 128:]
     else:
         raise NotImplementedError    
     
-
+    '''
     # decode again into images:
     pred_pov = model.VAE.decode_only(pred_pov.squeeze())
-    #rec_input = model.VAE.decode_only(enc_pov)
-    #model_output = model.VAE.decode_only(model.VAE.encode_only(following_povs)[2])
 
-    #print(model_output.shape)
     # visualize predicted pov and actual next frames
     images = []
     for i in range(len(pov)):
@@ -92,12 +91,25 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     out = cv2.VideoWriter(os.path.join(save_path,'dynamics_imgs',f'{model_class}_dynamics.mp4'),cv2.VideoWriter_fourcc(*'mp4v'), 25, size)
 
     for i in range(len(images)):
-        plt.figure()
-        plt.imshow(images[i][...,[2,1,0]])
-        plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_{i}.png'))
-        plt.close()
+        # plt.figure()
+        # plt.imshow(images[i][...,[2,1,0]])
+        # plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_{i}.png'))
+        # plt.close()
         out.write(images[i])
     out.release()
+    '''
+    
+    # plot difference between predicted and true vector obs
+    fig = plt.figure()
+    plt.plot((pred_vec[0] - following_vecs[0]).detach().cpu().numpy())
+    
+    def animate(i):
+        fig.set_ydata((pred_vec[i] - following_vecs[i]).detach().cpu().numpy())
+    
+    anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
+ 
+    plt.draw()
+    anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_{model_class}.mp4'))
 
 
 
