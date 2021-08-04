@@ -15,7 +15,6 @@ vae_model_by_str = {
 
 EPS = 1e-10
 
-
 class MDNRNNReward(nn.Module):
     def __init__(self, mdn_path, reward_path):
         super().__init__()
@@ -133,7 +132,11 @@ class MDN_RNN(pl.LightningModule):
         '''
         
         h_t, c_t = h0, c0
-        
+        if batched:
+            time_dim = 1
+        else:
+            time_dim = 0
+            
         if batched:
             # merge frames with batch
             pov = self.merge(pov)
@@ -160,6 +163,12 @@ class MDN_RNN(pl.LightningModule):
             
             # compute one-step predictions
             (s_mean, s_logstd), s_t, (h_t, c_t), log_mix_coeffs = self.forward_latent(states, actions, h_t, c_t, batched, stepwise=True)
+            s_mean_list.extend([[s_mean[i]] for i in range(s_mean.shape[time_dim])])
+            s_logstd_list.extend([[s_logstd[i]] for i in range(s_logstd.shape[time_dim])])
+            log_mix_coeffs_list.extend([[log_mix_coeffs[i]] for i in range(log_mix_coeffs.shape[time_dim])])
+            print(f's_mean.shape = {s_mean.shape}')
+            print(f's_logstd.shape = {s_logstd.shape}')
+            print(f'log_mix_coeffs.shape = {log_mix_coeffs.shape}')
             
             # extrapolate/imagine from each state
             for t in range(self.hparams.seq_len-1):
@@ -178,9 +187,18 @@ class MDN_RNN(pl.LightningModule):
                 print(f'extrapolated_means.shape = {extrapolated_means.shape}')
                 
                 # TODO make this work properly, i.e. respect proper order of the states
-                s_mean_list.append(extrapolated_means)
-                s_logstd_list.append(extrapolated_logstds)
-                log_mix_coeffs_list.append(extrapolated_log_coeffs)
+                for i in range(extrapolated_means.shape[time_dim]):
+                    if batched:
+                        s_mean_list[t+1+i].append(extrapolated_means[:,i])
+                        s_logstd_list[t+1+i].append(extrapolated_logstds[:,i])
+                        log_mix_coeffs_list[t+1+i].append(extrapolated_log_coeffs[:,i])
+                    else:
+                        s_mean_list[t+1+i].append(extrapolated_means[i])
+                        s_logstd_list[t+1+i].append(extrapolated_logstds[i])
+                        log_mix_coeffs_list[t+1+i].append(extrapolated_log_coeffs[i])
+            print(f'len(s_mean_list) = {len(s_mean_list)}')
+            print(f's_mean_list[0].shape = {s_mean_list[0].shape}')
+            print(f's_mean_list[-1].shape = {s_mean_list[-1].shape}')
         else:
             (s_mean, s_logstd), s_t, (h_n, c_n), log_mix_coeffs = self.forward_latent(states, actions, h_t, c_t, batched)
             h_t, c_t = h_n[:,-1], c_n[:,-1]
