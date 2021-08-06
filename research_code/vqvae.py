@@ -7,19 +7,23 @@ import os
 import math
 from argparse import ArgumentParser
 
+import numpy as np
+
+from torchvision.utils import make_grid
+
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-from model.deepmind_enc_dec import DeepMindEncoder, DeepMindDecoder
-from model.openai_enc_dec import OpenAIEncoder, OpenAIDecoder
-from model.openai_enc_dec import Conv2d as PatchedConv2d
-from model.quantize import VQVAEQuantize, GumbelQuantize
-from model.loss import Normal, LogitLaplace
+from vqvae_model.deepmind_enc_dec import DeepMindEncoder, DeepMindDecoder
+from vqvae_model.openai_enc_dec import OpenAIEncoder, OpenAIDecoder
+from vqvae_model.openai_enc_dec import Conv2d as PatchedConv2d
+from vqvae_model.quantize import VQVAEQuantize, GumbelQuantize
+from vqvae_model.loss import Normal, LogitLaplace
 
 import datasets
 
@@ -29,6 +33,7 @@ class VQVAE(pl.LightningModule):
 
     def __init__(self, args, input_channels=3):
         super().__init__()
+        self.save_hyperparameters()
         self.args = args
 
         # encoder/decoder module pair
@@ -62,11 +67,29 @@ class VQVAE(pl.LightningModule):
     
     @torch.no_grad()
     def reconstruct_only(self, x):
-        z = self.encoder(x)
+        z = self.encoder(self.recon_loss.inmap(x))
         z_q, _, _ = self.quantizer(z)
         x_hat = self.decoder(z_q)
-        return x_ha
+        x_hat = self.recon_loss.unmap(x_hat)
+        return x_hat
     
+    @torch.no_grad()
+    def encode_only(self, x):
+        '''
+        Encodes images into their latent space (via sampling).
+        Does not track gradients. Use e.g. as preprocessing/embedding.
+        Args:
+            x - input, for mineRL (B, C, H, W) batch of frames
+        Returns:
+            mean
+            std
+            sample - tensor of shape (B, L), where L is the latent dimension
+        '''
+        # encode
+        z = self.encoder(x)
+        z_q, _, ind = self.quantizer(z)
+
+        return z_q, ind
 
     def training_step(self, batch, batch_idx):
         img = batch[1]
@@ -179,6 +202,75 @@ class DecayLR(pl.Callback):
         for g in pl_module.optimizer.param_groups:
             g['lr'] = t
 
+
+class GenerateCallback(pl.Callback):
+    def __init__(self, batch_size=6, every_n_epochs=1, dataset=None, save_to_disk=False, every_n_batches=100, precision=32):
+        """
+        Inputs:
+            batch_size - Number of images to generate
+            every_n_epochs - Only save those images every N epochs (otherwise tensorboard gets quite large)
+            dataset - Dataset to sample from
+            save_to_disk - If True, the samples and image means should be saved to disk as well.
+        """
+        super().__init__()
+        self.batch_size = batch_size
+        self.every_n_epochs = every_n_epochs
+        self.every_n_batches = every_n_batches
+        self.save_to_disk = save_to_disk
+        self.dataset = dataset
+
+        #x_samples, x_mean = pl_module.sample(self.batch_size)
+        idx = np.random.choice(len(self.dataset), replace=False, size=self.batch_size)
+        batch = [self.dataset[i] for i in idx]
+        self.img_batch = torch.stack([b[1] for b in batch], dim=0)
+        if precision == 16:
+            self.img_batch = self.img_batch.half()
+
+    def on_epoch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (trainer.current_epoch+1) % self.every_n_epochs == 0:
+            self.sample_and_save(trainer, pl_module, trainer.current_epoch+1)
+    
+    def on_batch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (pl_module.global_step+1) % self.every_n_batches == 0:
+            self.sample_and_save(trainer, pl_module, pl_module.global_step+1)
+
+    def sample_and_save(self, trainer, pl_module, epoch):
+        """
+        Function that generates and save samples from the VAE.
+        The generated samples and mean images should be added to TensorBoard and,
+        if self.save_to_disk is True, saved inside the logging directory.
+        Inputs:
+            trainer - The PyTorch Lightning "Trainer" object.
+            pl_module - The VAE model that is currently being trained.
+            epoch - The epoch number to use for TensorBoard logging and saving of the files.
+        """
+        # Hints:
+        # - You can access the logging directory path via trainer.logger.log_dir, and
+        # - You can access the tensorboard logger via trainer.logger.experiment
+        # - Use the torchvision function "make_grid" to create a grid of multiple images
+        # - Use the torchvision function "save_image" to save an image grid to disk 
+
+        #x_samples, x_mean = pl_module.sample(self.batch_size)
+        
+        if self.img_batch.device != pl_module.device:
+            self.img_batch = self.img_batch.to(pl_module.device)
+
+        reconstructed_img = pl_module.reconstruct_only(self.img_batch)
+
+        images = torch.stack([self.img_batch, reconstructed_img], dim=1).reshape((self.batch_size * 2, *self.img_batch.shape[1:]))
+
+        # log images to tensorboard
+        trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
+
+
 def cli_main():
     pl.seed_everything(1337)
 
@@ -194,6 +286,7 @@ def cli_main():
     parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=6)
+    parser.add_argument("--val_perc", type=float, default=0.001)
     # model loading args
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
     parser.add_argument('--version', default=None, type=int, help='Version of model, if training is resumed from checkpoint')
@@ -207,25 +300,25 @@ def cli_main():
     run_name = f'VQVAE/{args.env_name}'
     log_dir = os.path.join(args.log_dir, run_name)
     os.makedirs(args.log_dir, exist_ok=True)
-    print(f'Saving logs and model to {args.log_dir}')
+    print(f'\nSaving logs and model to {log_dir}')
 
     # init model
-    if args.loading_from_checkpoint:
-        checkpoint_file = os.path.join(args.log_dir, run_name, 'lightning_logs', str(args.version), 'checkpoints', 'last.ckpt')
-        print(f'Loading model from {checkpoint_file}')
-        model = VQVAE.load_from_checkpoint(checkpoint_file)
+    if args.load_from_checkpoint:
+        checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')
+        print(f'\nLoading model from {checkpoint_file}')
+        model = VQVAE.load_from_checkpoint(checkpoint_file, args=args)
     else:
         model = VQVAE(args)
 
     # load data
-    data = datasets.VAEData(env_name, data_dir, num_data)
-    lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
+    data = datasets.VAEData(args.env_name, args.data_dir)
+    lengths = [len(data)-int(len(data)*args.val_perc), int(len(data)*args.val_perc)]
     train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=args.num_workers)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=args.num_workers)
+    train_loader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size, num_workers=args.num_workers)
+    val_loader = DataLoader(val_data, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers)
 
-    num_batches = len(train_data) // batch_size
-    if len(train_data) % batch_size != 0:
+    num_batches = len(train_data) // args.batch_size
+    if len(train_data) % args.batch_size != 0:
         num_batches += 1
 
     print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
@@ -233,13 +326,13 @@ def cli_main():
 
     # annealing schedules for lots of constants
     callbacks = []
-    callbacks.append(ModelCheckpoint(monitor='Validation/loss', mode='min'))
+    callbacks.append(ModelCheckpoint(monitor='Validation/loss', mode='min', save_last=True))
     # create callbacks to sample reconstructed images
-    callbacks.append(GenerateCallback(dataset=val_data, save_to_disk=False, precision=precision))
+    callbacks.append(GenerateCallback(dataset=val_data, save_to_disk=False))
     callbacks.append(DecayLR())
     if args.vq_flavor == 'gumbel':
        callbacks.extend([DecayTemperature(), RampBeta()])
-    trainer = pl.Trainer.from_argparse_args(args, callbacks=callbacks)
+    trainer = pl.Trainer.from_argparse_args(args, callbacks=callbacks, default_root_dir=log_dir, gpus=torch.cuda.device_count())
 
     trainer.fit(model, train_loader, val_loader)
 

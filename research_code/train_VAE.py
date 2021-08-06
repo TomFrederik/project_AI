@@ -3,7 +3,6 @@ import datasets
 
 import torch
 from torch.utils.data import DataLoader, random_split
-from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 
 import pytorch_lightning as pl
@@ -93,7 +92,8 @@ class GenerateCallback(pl.Callback):
 def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data, 
                 epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode,
                 latent_dim, beta, num_encoder_channels, val_check_interval, num_layers_per_block,
-                precision, load_from_checkpoint, version_dir, accumulate_grad_batches):
+                precision, load_from_checkpoint, version_dir, accumulate_grad_batches
+            ):
     
     # make sure that relevant dirs exist
     run_name = f'{model_class}_VAE/{env_name}'
@@ -146,8 +146,9 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data,
     if load_from_checkpoint:
         checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
         
-        print(f'Loading model from {checkpoint}')
-        model = STR_TO_CLASS[model_class].load_from_checkpoint(checkpoint, lr=lr)
+        print(f'\nLoading model from {checkpoint}')
+        model = STR_TO_CLASS[model_class].load_from_checkpoint(checkpoint, learning_rate=lr)
+        model.scheduler_kwargs['lr_decrease_freq'] = lr_decrease_freq
         #trainer = Trainer(resume_from_checkpoint = checkpoint)        
         #print(f'New model lr is {model.lr}')
     else:

@@ -24,7 +24,7 @@ STR_TO_MODEL = {
 }
 
 def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
-                        val_perc, eval_freq, batch_size, num_data, epochs, 
+                        val_perc, batch_size, num_data, epochs, 
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, num_components, temp, skip_connection,
                         val_check_interval, load_from_checkpoint, version_dir,
@@ -114,7 +114,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor=monitor, save_last=True)
     trainer=pl.Trainer(
                     precision=32, #32 is normal, 16 is mixed precision
-                    progress_bar_refresh_rate=100, #every N batches update progress bar
+                    progress_bar_refresh_rate=1, #every N batches update progress bar
+                    log_every_n_steps=10,
                     callbacks=[model_checkpoint],
                     gpus=torch.cuda.device_count(),
                     accelerator='dp', #anything else here seems to lead to crashes/errors
@@ -142,7 +143,6 @@ if __name__=='__main__':
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct a random val image for tensorboard')
     parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet'])
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
     parser.add_argument('--temp', type=float, default=1, help='Temperature parameter for gumbel softmax in MDN-RNN.')

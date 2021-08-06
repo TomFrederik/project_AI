@@ -39,7 +39,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     # pick some frame
     idx = 100
-    num_steps = 100
+    num_steps = 50
 
     if model_class == 'node':
         # overwrite model timesteps
@@ -61,6 +61,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
 
     # encode pov
+    #print(pov.shape)
     enc_pov = model.VAE.encode_only(pov)[2]
     rec_pov = model.VAE.decode_only(enc_pov)
 
@@ -78,6 +79,75 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     # decode again into images:
     pred_pov = model.VAE.decode_only(pred_pov.squeeze())
 
+    # change one pixel in each pred_pov to pure red to be able to distinguish truth from imagination
+    pred_pov[:,:,0,0] = torch.zeros_like(pred_pov[:,:,0,0])
+    pred_pov[:,0,0,0] = torch.ones_like(pred_pov[:,0,0,0])
+
+    # plot difference between predicted and true vector obs
+    all_data = (pred_vec - following_vecs).abs().detach()
+    baseline = (vec[-1][None,:] - following_vecs).abs().detach().cpu().numpy()
+    #idcs = torch.argsort(all_data.mean(dim=-1), descending=False)
+    #print(idcs.shape)
+    #pred_pov = pred_pov[idcs]
+    #print(pred_pov.shape)
+    #all_data = all_data[idcs].cpu().numpy()
+    all_data = all_data.cpu().numpy()
+    
+    #baseline[baseline == 0] += 1e-15
+    #all_data[all_data == 0] += 1e-15
+    #for i in range(len(following_vecs)):
+    #    print(following_vecs[i,:5])
+    
+    ydata = all_data[0]
+    ydata.sort()
+    baseline_ydata = baseline[0]
+    baseline_ydata.sort()
+    
+    fig = plt.figure()
+    ax = plt.axes()
+    plot = ax.plot(ydata, color='r', label='Model Error')[0]
+    ax.set_ylim(0, all_data.max())
+    
+    plt.legend()
+    def animate(i):
+        ydata = all_data[i]
+        ydata.sort()
+        plot.set_ydata(ydata)
+    
+    anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
+    plt.draw()
+    anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_model_{model_class}.mp4'))
+
+    fig = plt.figure()
+    ax = plt.axes()
+    #print(baseline.max())
+    baseline_plot = ax.plot(baseline_ydata, color='g', label='Baseline Error')[0]
+    ax.set_ylim(0, baseline.max())
+    
+    plt.legend()
+    def animate(i):
+        baseline_ydata = baseline[i]
+        baseline_ydata.sort()
+        baseline_plot.set_ydata(baseline_ydata)
+    
+    anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
+    plt.draw()
+    anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_baseline_{model_class}.mp4'))
+
+
+    
+    # match povs
+    diff = ((pred_pov - following_povs)**2).mean(dim=[1,2,3]).cpu().numpy()
+    #print(f'diff.shape = {diff.shape}')
+    plt.figure()
+    plt.plot(diff)
+    plt.ylim(diff.min(), diff.max())
+    plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_pov_diff.png'))
+    plt.close()
+    '''
+    pov_idcs = torch.argsort(diff, dim=0)[0,:]
+    pred_pov = pred_pov[pov_idcs]
+    '''
     # visualize predicted pov and actual next frames
     images = []
     for i in range(len(pov)):
@@ -90,29 +160,12 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     out = cv2.VideoWriter(os.path.join(save_path,'dynamics_imgs',f'{model_class}_dynamics.mp4'),cv2.VideoWriter_fourcc(*'mp4v'), 25, size)
 
     for i in range(len(images)):
+        print(images[i])
+        print(images[i].shape)
+        print(size)
+        raise ValueError
         out.write(images[i])
     out.release()
-    
-    
-    # plot difference between predicted and true vector obs
-    fig = plt.figure()
-    ax = plt.axes()
-    ydata = (pred_vec[0] - following_vecs[0]).detach().cpu().numpy()
-    ydata.sort()
-    plot = ax.plot(ydata)[0]
-    
-    def animate(i):
-        ydata = (pred_vec[i] - following_vecs[i]).detach().cpu().numpy()
-        ydata.sort()
-        plot.set_ydata(ydata)
-        ax.set_ylim(ydata.min(), ydata.max())
-    
-    anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
- 
-    plt.draw()
-    anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_{model_class}.mp4'))
-
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

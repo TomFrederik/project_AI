@@ -166,6 +166,10 @@ class VAE(pl.LightningModule):
             std
             sample - tensor of shape (B, L), where L is the latent dimension
         '''
+        #means = x.mean(dim=[2,3])
+        #stds = x.std(dim=[2,3])
+        # encode
+        #mean, log_std = self.encoder((x - means[None,None,...]) / stds[None,None,...])
         mean, log_std = self.encoder(x)
         sample = self.sample(mean, log_std)
 
@@ -190,13 +194,21 @@ class VAE(pl.LightningModule):
         x.requires_grad = True
         
         #mean, log_std = deepspeed.checkpointing.checkpoint(self.encoder, x)
+        # normalize each channel of each image
+        #means = x.mean(dim=[2,3])
+        #stds = x.std(dim=[2,3])
+        # encode
+        #mean, log_std = self.encoder((x - means[...,None,None]) / stds[...,None,None])
         mean, log_std = self.encoder(x)
         
+
+
         # compute KL difstance, i.e. regularization loss
         L_regul = (0.5 * (torch.exp(2 * log_std) + mean ** 2 - 1 - 2 * log_std)).sum(dim=-1).mean()
 
         # sample latent vector
         z = self.sample(mean, log_std)
+        
         # decode
         #x_new = deepspeed.checkpointing.checkpoint(self.decoder, z)
         x_new = self.decoder(z)
