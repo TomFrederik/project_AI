@@ -5,7 +5,7 @@ encoder, decoder and a quantize layer in the middle for the discrete bottleneck.
 
 import os
 import math
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 
 import numpy as np
 
@@ -28,19 +28,143 @@ from vqvae_model.loss import Normal, LogitLaplace
 import datasets
 
 # -----------------------------------------------------------------------------
+class VQVAE_new(pl.LightningModule):
+
+    def __init__(self, vq_flavor, enc_dec_flavor, embedding_dim, n_hid, num_embeddings, loss_flavor, input_channels=3):
+        super().__init__()
+        self.save_hyperparameters()
+
+        # encoder/decoder module pair
+        Encoder, Decoder = {
+            'deepmind': (DeepMindEncoder, DeepMindDecoder),
+            'openai': (OpenAIEncoder, OpenAIDecoder),
+        }[enc_dec_flavor]
+        self.encoder = Encoder(input_channels=input_channels, n_hid=n_hid)
+        self.decoder = Decoder(n_init=embedding_dim, n_hid=n_hid, output_channels=input_channels)
+
+        # the quantizer module sandwiched between them, +contributes a KL(posterior || prior) loss to ELBO
+        QuantizerModule = {
+            'vqvae': VQVAEQuantize,
+            'gumbel': GumbelQuantize,
+        }[vq_flavor]
+        self.quantizer = QuantizerModule(self.encoder.output_channels, num_embeddings, embedding_dim)
+
+        # the data reconstruction loss in the ELBO
+        ReconLoss = {
+            'l2': Normal,
+            'logit_laplace': LogitLaplace,
+            # todo: add vqgan
+        }[loss_flavor]
+        self.recon_loss = ReconLoss
+
+    def forward(self, x):
+        z = self.encoder(x)
+        z_q, latent_loss, ind = self.quantizer(z)
+        x_hat = self.decoder(z_q)
+        return x_hat, latent_loss, ind
+    
+    @torch.no_grad()
+    def reconstruct_only(self, x):
+        z = self.encoder(self.recon_loss.inmap(x))
+        z_q, _, _ = self.quantizer(z)
+        x_hat = self.decoder(z_q)
+        x_hat = self.recon_loss.unmap(x_hat)
+        return x_hat
+    
+    @torch.no_grad()
+    def encode_only(self, x):
+        '''
+        Encodes images into their latent space (via sampling).
+        Does not track gradients. Use e.g. as preprocessing/embedding.
+        Args:
+            x - input, for mineRL (B, C, H, W) batch of frames
+        Returns:
+            mean
+            std
+            sample - tensor of shape (B, L), where L is the latent dimension
+        '''
+        # encode
+        z = self.encoder(x)
+        z_q, _, ind = self.quantizer(z)
+
+        return z_q, ind
+
+    def training_step(self, batch, batch_idx):
+        img = batch[1]
+        img = self.recon_loss.inmap(img)
+        img_hat, latent_loss, ind = self.forward(img)
+        recon_loss = self.recon_loss.nll(img, img_hat)
+        loss = recon_loss + latent_loss
+        self.log('Training/batch_loss', loss, on_step=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        img = batch[1]
+        img = self.recon_loss.inmap(img)
+        img_hat, latent_loss, ind = self.forward(img)
+        recon_loss = self.recon_loss.nll(img, img_hat)
+        loss = recon_loss + latent_loss
+        self.log('Validation/loss', loss, on_epoch=True)
+        return loss
+
+        # debugging: cluster perplexity. when perplexity == num_embeddings then all clusters are used exactly equally
+        encodings = F.one_hot(ind, self.quantizer.n_embed).float().reshape(-1, self.quantizer.n_embed)
+        avg_probs = encodings.mean(0)
+        perplexity = (-(avg_probs * torch.log(avg_probs + 1e-10)).sum()).exp()
+        cluster_use = torch.sum(avg_probs > 0)
+        self.log('val_perplexity', perplexity, prog_bar=True)
+        self.log('val_cluster_use', cluster_use, prog_bar=True)
+
+    def configure_optimizers(self):
+
+        # separate out all parameters to those that will and won't experience regularizing weight decay
+        decay = set()
+        no_decay = set()
+        whitelist_weight_modules = (torch.nn.Linear, torch.nn.Conv2d, torch.nn.ConvTranspose2d, PatchedConv2d)
+        blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.BatchNorm2d, torch.nn.Embedding)
+        for mn, m in self.named_modules():
+            for pn, p in m.named_parameters():
+                fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
+
+                if pn.endswith('bias'):
+                    # all biases will not be decayed
+                    no_decay.add(fpn)
+                elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
+                    # weights of whitelist modules will be weight decayed
+                    decay.add(fpn)
+                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
+                    # weights of blacklist modules will NOT be weight decayed
+                    no_decay.add(fpn)
+
+        # validate that we considered every parameter
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        inter_params = decay & no_decay
+        union_params = decay | no_decay
+        assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
+        assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
+                                                    % (str(param_dict.keys() - union_params), )
+
+        # create the pytorch optimizer object
+        optim_groups = [
+            {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": 1e-4},
+            {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
+        ]
+        optimizer = torch.optim.AdamW(optim_groups, lr=3e-4, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-4)
+        self.optimizer = optimizer
+
+        return optimizer
 
 class VQVAE(pl.LightningModule):
 
     def __init__(self, args, input_channels=3):
         super().__init__()
         self.save_hyperparameters()
-        self.args = args
 
         # encoder/decoder module pair
         Encoder, Decoder = {
             'deepmind': (DeepMindEncoder, DeepMindDecoder),
             'openai': (OpenAIEncoder, OpenAIDecoder),
-        }[args.enc_dec_flavor]
+        }[enc_dec_flavor]
         self.encoder = Encoder(input_channels=input_channels, n_hid=args.n_hid)
         self.decoder = Decoder(n_init=args.embedding_dim, n_hid=args.n_hid, output_channels=input_channels)
 
@@ -156,19 +280,6 @@ class VQVAE(pl.LightningModule):
 
         return optimizer
 
-    @staticmethod
-    def add_model_specific_args(parent_parser):
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
-        # model type
-        parser.add_argument("--vq_flavor", type=str, default='vqvae', choices=['vqvae', 'gumbel'])
-        parser.add_argument("--enc_dec_flavor", type=str, default='deepmind', choices=['deepmind', 'openai'])
-        parser.add_argument("--loss_flavor", type=str, default='l2', choices=['l2', 'logit_laplace'])
-        # model size
-        parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
-        parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
-        parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
-        return parser
-
 # -----------------------------------------------------------------------------
 def cos_anneal(e0, e1, t0, t1, e):
     """ ramp from (e0, t0) -> (e1, t1) through a cosine schedule based on e \in [e0, e1] """
@@ -279,9 +390,15 @@ def cli_main():
     parser = ArgumentParser()
     # training related
     parser = pl.Trainer.add_argparse_args(parser)
-    # model related
-    parser = VQVAE.add_model_specific_args(parser)
-    # dataloader related
+    # model type
+    parser.add_argument("--vq_flavor", type=str, default='vqvae', choices=['vqvae', 'gumbel'])
+    parser.add_argument("--enc_dec_flavor", type=str, default='deepmind', choices=['deepmind', 'openai'])
+    parser.add_argument("--loss_flavor", type=str, default='l2', choices=['l2', 'logit_laplace'])
+    # model size
+    parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
+    parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
+    parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
+# dataloader related
     parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
     parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
     parser.add_argument("--batch_size", type=int, default=128)
@@ -303,12 +420,19 @@ def cli_main():
     print(f'\nSaving logs and model to {log_dir}')
 
     # init model
+    vqvae_args = Namespace({
+            'vq_flavor':args.vq_flavor, 
+            'enc_dec_flavor':args.enc_dec_flavor, 
+            'embedding_dim':args.embedding_dim, 
+            'n_hid':args.n_hid, 
+            'num_embeddings':args.num_embeddings
+        })
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')
         print(f'\nLoading model from {checkpoint_file}')
-        model = VQVAE.load_from_checkpoint(checkpoint_file, args=args)
+        model = VQVAE.load_from_checkpoint(checkpoint_file, args=vqvae_args)
     else:
-        model = VQVAE(args)
+        model = VQVAE(args = vqvae_args)
 
     # load data
     data = datasets.VAEData(args.env_name, args.data_dir)
