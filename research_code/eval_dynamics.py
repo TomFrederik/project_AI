@@ -62,16 +62,18 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     # encode pov
     #print(pov.shape)
-    enc_pov = model.VAE.encode_only(pov)[2]
+    enc_pov = model.VAE.encode_only(pov)[0]
     rec_pov = model.VAE.decode_only(enc_pov)
 
     # prepare model input
-    states = torch.cat([enc_pov, vec], dim=1)
-    
+    #states = torch.cat([enc_pov, vec], dim=1)
+    states = enc_pov
+    print(f'states.shape = {states.shape}')
+    print(f'actions.shape = {actions.shape}')
     if model_class in ['rssm', 'mdn']:
         predicted_states = model.predict_recursively(states, actions, horizon=num_steps)
-        pred_pov = predicted_states[:, :128]
-        pred_vec = predicted_states[:, 128:]
+        pred_pov = predicted_states
+        #pred_vec = predicted_states[:, 128:]
     else:
         raise NotImplementedError    
     
@@ -83,6 +85,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     pred_pov[:,:,0,0] = torch.zeros_like(pred_pov[:,:,0,0])
     pred_pov[:,0,0,0] = torch.ones_like(pred_pov[:,0,0,0])
 
+    '''
     # plot difference between predicted and true vector obs
     all_data = (pred_vec - following_vecs).abs().detach()
     baseline = (vec[-1][None,:] - following_vecs).abs().detach().cpu().numpy()
@@ -133,9 +136,9 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
     plt.draw()
     anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_baseline_{model_class}.mp4'))
+    '''
 
-
-    
+    '''
     # match povs
     diff = ((pred_pov - following_povs)**2).mean(dim=[1,2,3]).cpu().numpy()
     #print(f'diff.shape = {diff.shape}')
@@ -144,7 +147,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     plt.ylim(diff.min(), diff.max())
     plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_pov_diff.png'))
     plt.close()
-    '''
+    
     pov_idcs = torch.argsort(diff, dim=0)[0,:]
     pred_pov = pred_pov[pov_idcs]
     '''
@@ -160,10 +163,6 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     out = cv2.VideoWriter(os.path.join(save_path,'dynamics_imgs',f'{model_class}_dynamics.mp4'),cv2.VideoWriter_fourcc(*'mp4v'), 25, size)
 
     for i in range(len(images)):
-        print(images[i])
-        print(images[i].shape)
-        print(size)
-        raise ValueError
         out.write(images[i])
     out.release()
 
@@ -171,10 +170,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--model_path', help='Path to dynamics model')
-    parser.add_argument('--model_class', help='model class')
-    parser.add_argument('--env_name')
-    parser.add_argument('--data_dir')
-    parser.add_argument('--save_path', help='Path where the output should be saved')
+    parser.add_argument('--model_class', help='model class', default='mdn')
+    parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
+    parser.add_argument('--save_path', help='Path where the output should be saved', default='/home/lieberummaas/datadisk/minerl/')
 
     args = vars(parser.parse_args())
 

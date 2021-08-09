@@ -57,7 +57,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         monitor = 'Validation/loss'
     elif dynamics_model == 'rssm':
         seq_len = seq_len        
-        lstm_kwargs = {'num_layers':1, 'hidden_size':1024}
+        lstm_kwargs = {'num_layers':1, 'hidden_size':2024}
         model_kwargs = {
             'lstm_kwargs':lstm_kwargs, 
             'seq_len':seq_len, 
@@ -143,7 +143,7 @@ if __name__=='__main__':
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet'])
+    parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet', 'vqvae'])
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
     parser.add_argument('--temp', type=float, default=1, help='Temperature parameter for gumbel softmax in MDN-RNN.')
     parser.add_argument('--skip_connection', action='store_true', help='Whether to use skip connection in MDN-RNN.')

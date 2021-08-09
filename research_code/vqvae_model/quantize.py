@@ -52,11 +52,7 @@ class VQVAEQuantize(nn.Module):
             self.data_initialized.fill_(1)
             # TODO: this won't work in multi-GPU setups
 
-        dist = (
-            flatten.pow(2).sum(1, keepdim=True)
-            - 2 * flatten @ self.embed.weight.t()
-            + self.embed.weight.pow(2).sum(1, keepdim=True).t()
-        )
+        dist = self.get_dist(flatten)
         _, ind = (-dist).max(1)
         ind = ind.view(B, H, W)
 
@@ -69,6 +65,18 @@ class VQVAEQuantize(nn.Module):
         z_q = z_e + (z_q - z_e).detach() # noop in forward pass, straight-through gradient estimator in backward pass
         z_q = z_q.permute(0, 3, 1, 2) # stack encodings into channels again: (B, C, H, W)
         return z_q, diff, ind
+
+    def get_dist(self, flat_z):
+        '''
+        returns distance from z to each embedding vec
+        flat_z should be of shape (B*H*W, C), e.g. (10*16*16, 256)
+        '''
+        dist = (
+            flat_z.pow(2).sum(1, keepdim=True)
+            - 2 * flat_z @ self.embed.weight.t()
+            + self.embed.weight.pow(2).sum(1, keepdim=True).t()
+        )
+        return dist
 
     def embed_code(self, embed_id):
         return F.embedding(embed_id, self.embed.weight)

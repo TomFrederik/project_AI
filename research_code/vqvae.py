@@ -164,7 +164,7 @@ class VQVAE(pl.LightningModule):
         Encoder, Decoder = {
             'deepmind': (DeepMindEncoder, DeepMindDecoder),
             'openai': (OpenAIEncoder, OpenAIDecoder),
-        }[enc_dec_flavor]
+        }[args.enc_dec_flavor]
         self.encoder = Encoder(input_channels=input_channels, n_hid=args.n_hid)
         self.decoder = Decoder(n_init=args.embedding_dim, n_hid=args.n_hid, output_channels=input_channels)
 
@@ -188,6 +188,7 @@ class VQVAE(pl.LightningModule):
         z_q, latent_loss, ind = self.quantizer(z)
         x_hat = self.decoder(z_q)
         return x_hat, latent_loss, ind
+
     
     @torch.no_grad()
     def reconstruct_only(self, x):
@@ -197,6 +198,13 @@ class VQVAE(pl.LightningModule):
         x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
     
+    @torch.no_grad()
+    def decode_only(self, z_q):
+        x_hat = self.decoder(z_q)
+        x_hat = self.recon_loss.unmap(x_hat)
+        return x_hat
+    
+
     @torch.no_grad()
     def encode_only(self, x):
         '''
@@ -210,7 +218,7 @@ class VQVAE(pl.LightningModule):
             sample - tensor of shape (B, L), where L is the latent dimension
         '''
         # encode
-        z = self.encoder(x)
+        z = self.encoder(self.recon_loss.inmap(x))
         z_q, _, ind = self.quantizer(z)
 
         return z_q, ind
@@ -420,12 +428,13 @@ def cli_main():
     print(f'\nSaving logs and model to {log_dir}')
 
     # init model
-    vqvae_args = Namespace({
+    vqvae_args = Namespace(**{
             'vq_flavor':args.vq_flavor, 
             'enc_dec_flavor':args.enc_dec_flavor, 
             'embedding_dim':args.embedding_dim, 
             'n_hid':args.n_hid, 
-            'num_embeddings':args.num_embeddings
+            'num_embeddings':args.num_embeddings,
+            'loss_flavor':args.loss_flavor
         })
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')
