@@ -35,7 +35,8 @@ class MDNRNNReward(nn.Module):
 class MDN_RNN(pl.LightningModule):
     def __init__(self, lstm_kwargs, optim_kwargs, scheduler_kwargs, 
                  seq_len, num_components, VAE_path, temp=1, 
-                 VAE_class='Conv', skip_connection=True, latent_overshooting=False):
+                 VAE_class='Conv', skip_connection=True, latent_overshooting=False,
+                 soft_targets=False):
         super().__init__()
         
         # save params
@@ -43,30 +44,50 @@ class MDN_RNN(pl.LightningModule):
 
         # load VAE
         self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
-        self.VAE.eval()
+        #self.VAE.eval()
         if self.hparams.VAE_class == 'vqvae':
             self.latent_dim = self.VAE.hparams.args.embedding_dim
             self.num_embeddings = self.VAE.hparams.args.num_embeddings
             #print(self.VAE.encoder(torch.ones(2,3,64,64).float().to(self.VAE.device)).shape)
             #raise ValueError
-            self.latent_size = np.prod(self.VAE.encoder(torch.ones(2,3,64,64).float().to(self.VAE.device)).shape[2:])
+            dummy = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))[0]
+            self.latent_h = dummy.shape[-1]
+            self.latent_size = np.prod(dummy.shape[2:])
+            
+            conv_net = True
+            if conv_net:
+                num_channels = dummy.shape[1]
+                self.conv_net = nn.Sequential(
+                    nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=3, padding=1, stride=1), # 16 -> 16
+                    nn.GELU(),
+                    nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=3, padding=1, stride=1), # 16 -> 16
+                    nn.GELU(),
+                    nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=3, padding=1, stride=1), # 16 -> 16
+                    nn.GELU()
+                )
+                dummy = self.conv_net(dummy)
+                self.pre_lstm_size = np.prod(dummy.shape[2:])
+                self.pre_lstm_channels = dummy.shape[1]
+                print(f'pre_lstm_size (H*W) = {self.pre_lstm_size}')
+            
+            else:
+                self.conv_net = None
+                self.pre_lstm_channels = self.latent_size
+                self.pre_lstm_size = self.latent_dim
+    
             print(f'latent_size (H*W) = {self.latent_size}')
+    
         else:
             self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
 
         # set up model
-        lstm_input_dim = self.latent_dim * self.latent_size + 64# + 128 # s_t-1, a_t-1,  where s_t = [z_t, v_t]
+        lstm_input_dim = self.pre_lstm_channels * self.pre_lstm_size + 64
         self.lstm = nn.LSTM(**lstm_kwargs, input_size=lstm_input_dim, batch_first=True)
-        '''self.conv_net = nn.Sequential(
-            nn.Conv2d(in_channels=2 * self.VAE.hparams.args.n_hid, out_channels=128, kernel_size=3, padding=1),
-            nn.GELU()
-            nn.Conv2d(in_channels=128, out_channels=64, kernel_size=3, padding=0),
-            nn.Conv2d(),
-        )'''
+        
         if self.hparams.VAE_class == 'vqvae':
             self.mdn_network = nn.Sequential(
                                                 nn.Linear(lstm_kwargs['hidden_size'], 2024), 
-                                                nn.GELU(),
+                                                #nn.GELU(),
                                                 #nn.BatchNorm1d(2024), 
                                                 #nn.Linear(2024, 2024),
                                                 #nn.GELU(),
@@ -76,8 +97,8 @@ class MDN_RNN(pl.LightningModule):
                                                 #nn.BatchNorm1d(2024),
                                                 nn.Linear(2024, 512),
                                                 nn.GELU(),
-                                                #nn.BatchNorm1d(2024),
-                                                nn.Linear(512, self.num_embeddings * self.latent_size)# + 2 * 64))
+                                                #nn.BatchNorm1d(512),
+                                                nn.Linear(512, self.latent_dim * self.latent_size)# + 2 * 64))
                                             ) # first num_component outputs determine the mixing coeffs, the rest parameterize the distributions
         else:
             raise NotImplementedError('Models other than VQVAE are currently not supported')
@@ -95,7 +116,7 @@ class MDN_RNN(pl.LightningModule):
         pov, vec, actions, _ = batch
 
         # predict distribution over next state and sample
-        pov_dist_list, _, _, target = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
+        pov_dist_list, target = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
         
         # Compute loss over all time horizons
         loss = 0
@@ -115,8 +136,12 @@ class MDN_RNN(pl.LightningModule):
             pov_dist = einops.rearrange(pov_dist, 'b t num_embed latent_size -> b num_embed latent_size t')#, latent_size=self.latent_size)
             #print(f'pov_dist.shape = {pov_dist.shape}')
             # target is the ground truth state at time t, which should be compared to prediction which started from time t
-            cur_pov_target = target['pov'][:,t]
+            cur_pov_target = target['pov'][:,t] 
             #print(f'cur_target.shape = {cur_target.shape}')
+            if self.hparams.soft_targets:
+                cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size num_embeds -> b num_embeds latent_size t', t=t+1)
+            else:
+                cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size -> b latent_size t', t=t+1)
 
             # get log likelihood of target under distributions, sum over feature dimension
             # target is copied along component and time axis
@@ -129,9 +154,15 @@ class MDN_RNN(pl.LightningModule):
             
             # compute loss via logsumexp, sum over components, mean over batch and starting states
             #loss += -torch.logsumexp(log_mix_coeffs + logp , dim=1).mean()
-            cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size -> b latent_size t', t=t+1)
             #print(f'cur_pov_target.shape = {cur_pov_target.shape}')
-            cur_loss = nn.CrossEntropyLoss()(pov_dist, cur_pov_target)
+            if self.hparams.soft_targets:
+                #posterior_loss = -einops.reduce(cur_pov_target * nn.LogSoftmax(dim=1)(pov_dist.detach()), 'b num_embeds latent_size t -> b', 'sum').mean()
+                prior_loss = -einops.reduce(cur_pov_target.detach() * nn.LogSoftmax(dim=1)(pov_dist), 'b num_embeds latent_size t -> b', 'sum').mean()
+                #cur_loss = 0.2 * posterior_loss + 0.8 * prior_loss # KL Balancing
+                cur_loss = prior_loss
+            else:
+                cur_loss = nn.CrossEntropyLoss()(pov_dist, cur_pov_target)
+            
             loss += cur_loss
             loss_list.append(cur_loss)
             #print(f'loss.shape = {loss.shape}')
@@ -148,13 +179,10 @@ class MDN_RNN(pl.LightningModule):
             actions - ([B], T, 64)
             h0 - ([B], lstm_kwargs['hidden_size'],)
             c0 - ([B], lstm_kwargs['hidden_size'],)
+            latent_overshooting - Bool, whether to use latent overshooting
         Output:
-            (s_mean_list, s_logstd_list) - lists of belief over state
-                each element is beliefs over the same state but obtained by extrapolating
-                from different previous starting states, shape ([B], t, latent_dim + vec_dim), with 1 <= t <= T-1
-            s_t -  sample from the above factorized normal distribution #TODO fix so that list is returned
-            (h_n, c_n) - last hidden and cell state of the lstm #TODO fix so that list is returned
-            log_mix_coeffs_list - list of log of mixing coefficients, ([B] * T, num_components)
+            pov_dist_list - List, pov_dist_list[t] contains predictions of the pov distribution
+                            at time t, starting from different states previous to t
             target - ([B], T-1, latent_dim + vec_dim) sample of ground truth encoding
         '''
         
@@ -181,19 +209,30 @@ class MDN_RNN(pl.LightningModule):
         #print(f'pov_sample.shape = {pov_sample.shape}')
 
         states = pov_sample
-        #print(f'states.shape = {states.shape}')
         #print(f'ind[:,1:].shape = {ind[:,1:].shape}')
         
         # stack pov and vec to construct target
         if self.hparams.VAE_class == 'vqvae':
-            target = {
-                'pov': ind[:,1:],
-                'vec': vec[:,1:]
-            }
+            if self.hparams.soft_targets:
+                # compute probs as softmax(-dist)
+                pov_targets = torch.softmax(-self.VAE.quantizer.get_dist(einops.rearrange(pov_sample[:,1:], 'b t dim hw -> (b hw t) dim')), dim=1)
+                pov_targets = einops.rearrange(pov_targets, '(b hw t) num_embeds -> b t hw num_embeds', hw=self.latent_size, t=seq_len-1)
+                
+                # make sure probs sum to one
+                assert pov_targets.sum(dim=-1).allclose(torch.ones_like(pov_targets[...,0]), atol=1e-10)
+                
+                target = {
+                    'pov': pov_targets
+                    #'vec': vec[:,1:]
+                }
+            else:
+                target = {
+                   'pov': ind[:,1:]
+                    #'vec': vec[:,1:]
+                }
         else:
             target = torch.cat([pov_sample, vec], dim=-1)
             target = target[:,1:]
-
 
         # latent overshooting
         pov_dist_list = []
@@ -235,7 +274,7 @@ class MDN_RNN(pl.LightningModule):
         for i in range(len(pov_dist_list)):
             pov_dist_list[i] = torch.stack(pov_dist_list[i], dim=1)
             
-        return pov_dist_list, s_t, (h_t, c_t), target
+        return pov_dist_list, target
             
     def forward_latent(self, states, actions, h0=None, c0=None, stepwise=False):
         '''
@@ -249,22 +288,28 @@ class MDN_RNN(pl.LightningModule):
             c0 - ([B], lstm_kwargs['hidden_size'],)
             stepwise - Bool, whether to process input sequentially and store cell state after each time step
         Output:
-            (s_mean, s_logstd) - belief over state, shape ([B] * T, num_components * (2 * latent_dim + action_dim))
-            s_t -  sample from the above factorized normal distribution
-            (h_t, c_t) - hidden and cell state of the lstm after each time step
-            log_mix_coeffs - log of mixing coefficients, ([B] * T, num_components)
+            pov_dist - distribution over the next latent space
+            s_t -  sample from the above distribution
+            (h_t, c_t) - hidden and cell state of the lstm after each time step (if stepwise, otherwise only after the last step)
         '''
         # concat states and action
         #print(f'states.shape = {states.shape}')
         #print(f'actions.shape = {actions.shape}')
         seq_len = actions.shape[1]
-        states = einops.rearrange(states, 'b t c hw -> b t (c hw)')
+        
+        if self.conv_net is not None:
+            states = self.conv_net(einops.rearrange(states, 'b t c (h w) -> (b t) c h w', h=self.latent_h))
+            #print(f'states.shape = {states.shape}')
+            states = einops.rearrange(states, '(b t) c h w -> b t (c h w)', t=seq_len)
+            #print(f'states.shape = {states.shape}')
+        else:
+            states = einops.rearrange(states, 'b t c hw -> b t (c hw)')
         #actions = einops.repeat(actions, 'b t act_dim -> b t act_dim latent_size', latent_size=states.shape[-1])
         #actions = actions[...,None].repeat(1,1,1,states.shape[-1])
         #print(f'actions.shape = {actions.shape}')
 
         lstm_input = torch.cat([states, actions], dim=2)
-        
+
         #print(f'lstm_input.shape = {lstm_input.shape}')
         # merge HW with batch
         b = lstm_input.shape[0]
@@ -326,19 +371,19 @@ class MDN_RNN(pl.LightningModule):
         h_t = einops.rearrange(h_t, 'b t d -> (b t) d', t=seq_len)
         #print(f'h_t.shape = {h_t.shape}')
         # compute next state
-        mdn_out = self.mdn_network(h_t) 
+        mdn_out = self.mdn_network(h_t) # (b t (latent_dim * latent_size))
         h_t = einops.rearrange(h_t, '(b t) d -> b t d', t=seq_len)
         #print(f'h_t.shape = {h_t.shape}')
         #print(f'mdn_out.shape = {mdn_out.shape}')
 
         if self.hparams.VAE_class == 'vqvae':
-            pov_dist = einops.rearrange(mdn_out, 'bt (num_embeds latent_size) -> (bt latent_size) num_embeds', latent_size=self.latent_size)
-        else:
-            raise NotImplementedError
-            
-        # sample from the mixture of multi-dim gaussians parameterized by h_t
-        if self.hparams.VAE_class == 'vqvae':
-            # sample from discrete dist
+            #pov_dist = einops.rearrange(mdn_out, 'bt (num_embeds latent_size) -> (bt latent_size) num_embeds', latent_size=self.latent_size)
+            pov_pred = einops.rearrange(mdn_out, 'bt (embedding_dim latent_size) -> (bt latent_size) embedding_dim', latent_size=self.latent_size)
+            # skip connection
+            pov_pred += einops.rearrange(states, 'b t (embedding_dim latent_size) -> (b t latent_size) embedding_dim', latent_size=self.latent_size)
+            # compute distance and closest embedding vector
+            pov_dist = self.VAE.quantizer.get_dist(pov_pred)
+            #print(f'pov_dist.shape = {pov_dist.shape}') 
             ind = torch.argmax(torch.softmax(pov_dist, dim=-1), dim=-1)
             z_q = self.VAE.quantizer.embed_code(ind)
             #print(f'z_q.shape = {z_q.shape}')
@@ -355,8 +400,8 @@ class MDN_RNN(pl.LightningModule):
             state - ([B], 64 + latent_dim)
             actions - ([B], T', 64), where T' is the number of steps the function will extrapolate
         Returns:
-            extrapolated_means - ([B], T', num_components * (64 + latent_dim))
-            extrapolated_logstds - ([B], T', num_components * (64 + latent_dim))
+            extrapolated_states - ([B], T', num_components * (64 + latent_dim))
+            extrapolated_pov_dist - ([B], T', num_components * (64 + latent_dim))
         '''
         if h0 is not None:
             h_n = h0[None,:].contiguous()
@@ -374,14 +419,20 @@ class MDN_RNN(pl.LightningModule):
         
         extrapolated_states = []
         extrapolated_pov_dist = []
-        
+        #print('\n\nextrapolate:\n')
         #print(f'state.shape = {state.shape}')
         #print(f'actions.shape = {actions.shape}')
-
+        if self.conv_net is not None:
+            state = self.conv_net(einops.rearrange(state, 'b t c (h w) -> (b t) c h w', h=self.latent_h))
+            #print(f'state.shape = {state.shape}')
+            state = einops.rearrange(state, '(b t) c h w -> b t (c h w)', t=1)
+            #print(f'state.shape = {state.shape}')
+                
         for t in range(steps):
             action = actions[:,t][:,None,:]
-            #print(state.shape)
-            if t == 0:
+            #print(f'state.shape = {state.shape}')
+
+            if t == 0 and self.conv_net is None:
                 state = einops.rearrange(state, 'b t embed_dim latent_size -> b t (embed_dim latent_size)')
             #print(f'state.shape = {state.shape}')
             #print(f'action.shape = {action.shape}')
@@ -405,24 +456,30 @@ class MDN_RNN(pl.LightningModule):
             mdn_out = self.mdn_network(h_t) 
             pov_dist = einops.rearrange(mdn_out, 'bt (num_embeds latent_size) -> (bt latent_size) num_embeds', latent_size=self.latent_size)
 
-            #print(f'pov_dist.shape = {pov_dist.shape}')
             #print(f'mdn_out.shape = {mdn_out.shape}')
+            #print(f'pov_dist.shape = {pov_dist.shape}')
 
             
             if self.hparams.VAE_class == 'vqvae':
-                # sample from discrete dist
+                #pov_dist = einops.rearrange(mdn_out, 'bt (num_embeds latent_size) -> (bt latent_size) num_embeds', latent_size=self.latent_size)
+                pov_pred = einops.rearrange(mdn_out, 'bt (embedding_dim latent_size) -> (bt latent_size) embedding_dim', latent_size=self.latent_size)
+                # skip connection
+                pov_pred += einops.rearrange(state, 'b t (embedding_dim latent_size) -> (b t latent_size) embedding_dim', latent_size=self.latent_size)
+                # compute distance and closest embedding vector
+                pov_dist = self.VAE.quantizer.get_dist(pov_pred)
+                #print(f'pov_dist.shape = {pov_dist.shape}') 
                 ind = torch.argmax(torch.softmax(pov_dist, dim=-1), dim=-1)
                 z_q = self.VAE.quantizer.embed_code(ind)
                 #print(f'z_q.shape = {z_q.shape}')
-                s_t = einops.rearrange(z_q, '(b latent_size) embed_dim -> b 1 embed_dim latent_size', latent_size=self.latent_size)
-
+                #print(f'ind.shape = {ind.shape}')
+                s_t = einops.rearrange(z_q, '(bt latent_size) embed_dim -> bt embed_dim latent_size', latent_size=self.latent_size)
             else:
                 raise NotImplementedError
             
             pov_dist = einops.rearrange(pov_dist, '(b latent_size) num_embeds -> b num_embeds latent_size', latent_size=self.latent_size)
             #print(f'pov_dist.shape = {pov_dist.shape}')
 
-            extrapolated_states.append(einops.rearrange(state[:,0,:], 'b D -> D b'))
+            extrapolated_states.append(s_t)
             extrapolated_pov_dist.append(pov_dist)
         
         extrapolated_states = torch.stack(extrapolated_states, dim=1)
@@ -453,7 +510,7 @@ class MDN_RNN(pl.LightningModule):
         #print(f'c_n.shape = {c_n.shape}')
         h_n = h_n[:,-1]
         c_n = c_n[-1]
-        print(f'states.shape = {states.shape}')
+        #print(f'states.shape = {states.shape}')
 
         state = einops.rearrange(states, 't embed_dim latent_size-> 1 t embed_dim latent_size')[:,-1]
         #print(state.shape)
@@ -463,11 +520,10 @@ class MDN_RNN(pl.LightningModule):
         #print(f'c_n.shape = {c_n.shape}')
         # extrapolate
         predicted_states, _ = self.extrapolate_latent(state, actions[-horizon:], h0=h_n, c0=c_n)
-        print(f'predicted_states[...,0].shape = {predicted_states[...,0].shape}')
-        print(f'state[0,0] shape = {state[0,0].shape}')
-        state = einops.rearrange(state[0,0], 'embed_dim latent_size -> (embed_dim latent_size) 1')
-        predicted_states = torch.cat([state, predicted_states[...,0]], dim=1)
-        predicted_states = einops.rearrange(predicted_states, '(embed_dim h w) t -> t embed_dim h w', h=h, w=h)
+        #print(f'predicted_states.shape = {predicted_states.shape}')
+        #print(f'state.shape = {state.shape}')
+        predicted_states = torch.cat([state, predicted_states], dim=1)
+        predicted_states = einops.rearrange(predicted_states, 'b t embed_dim (h w) -> b t embed_dim h w', h=h, w=h)[0]
         #print(f'predicted_states.shape = {predicted_states.shape}')
         return predicted_states
 
@@ -513,7 +569,10 @@ class MDN_RNN(pl.LightningModule):
     
     def configure_optimizers(self):
         # set up optimizer
-        optimizer = torch.optim.Adam(self.parameters(), **self.hparams.optim_kwargs)
+        params = list(self.lstm.parameters()) + list(self.mdn_network.parameters())
+        if self.conv_net is not None:
+            params = params + list(self.conv_net.parameters())
+        optimizer = torch.optim.Adam(params, **self.hparams.optim_kwargs)
         # set up scheduler
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])
         lr_dict = {

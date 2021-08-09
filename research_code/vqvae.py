@@ -203,24 +203,11 @@ class VQVAE(pl.LightningModule):
         x_hat = self.decoder(z_q)
         x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
-    
 
     @torch.no_grad()
     def encode_only(self, x):
-        '''
-        Encodes images into their latent space (via sampling).
-        Does not track gradients. Use e.g. as preprocessing/embedding.
-        Args:
-            x - input, for mineRL (B, C, H, W) batch of frames
-        Returns:
-            mean
-            std
-            sample - tensor of shape (B, L), where L is the latent dimension
-        '''
-        # encode
         z = self.encoder(self.recon_loss.inmap(x))
         z_q, _, ind = self.quantizer(z)
-
         return z_q, ind
 
     def training_step(self, batch, batch_idx):

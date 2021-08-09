@@ -56,17 +56,16 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     following_acts = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[2] for i in range(num_steps)], dim=0)
     actions = torch.cat([act, following_acts], dim=0)
 
-    following_povs = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[0] for i in range(num_steps)], dim=0)
-    following_vecs = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[1] for i in range(num_steps)], dim=0)
+    following_povs = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[0] for i in range(num_steps)], dim=0).detach()
+    following_vecs = torch.stack([get_tensors(traj_list, idx+i+1, model.device)[1] for i in range(num_steps)], dim=0).detach()
 
 
     # encode pov
     #print(pov.shape)
     enc_pov = model.VAE.encode_only(pov)[0]
-    rec_pov = model.VAE.decode_only(enc_pov)
+    rec_pov = model.VAE.decode_only(enc_pov).detach()
 
     # prepare model input
-    #states = torch.cat([enc_pov, vec], dim=1)
     states = enc_pov
     print(f'states.shape = {states.shape}')
     print(f'actions.shape = {actions.shape}')
@@ -77,9 +76,8 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     else:
         raise NotImplementedError    
     
-    
     # decode again into images:
-    pred_pov = model.VAE.decode_only(pred_pov.squeeze())
+    pred_pov = model.VAE.decode_only(pred_pov.squeeze()).detach()
 
     # change one pixel in each pred_pov to pure red to be able to distinguish truth from imagination
     pred_pov[:,:,0,0] = torch.zeros_like(pred_pov[:,:,0,0])

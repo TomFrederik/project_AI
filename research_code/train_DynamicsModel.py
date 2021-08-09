@@ -28,13 +28,13 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, num_components, temp, skip_connection,
                         val_check_interval, load_from_checkpoint, version_dir,
-                        latent_overshooting):
+                        latent_overshooting, soft_targets):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
     log_dir = os.path.join(log_dir, run_name)
     os.makedirs(log_dir, exist_ok=True)
-    print(f'Saving logs and model to {log_dir}')
+    print(f'\nSaving logs and model to {log_dir}')
 
     ## some model kwargs
     optim_kwargs = {'lr':lr}
@@ -57,7 +57,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         monitor = 'Validation/loss'
     elif dynamics_model == 'rssm':
         seq_len = seq_len        
-        lstm_kwargs = {'num_layers':1, 'hidden_size':2024}
+        lstm_kwargs = {'num_layers':1, 'hidden_size':2048}
         model_kwargs = {
             'lstm_kwargs':lstm_kwargs, 
             'seq_len':seq_len, 
@@ -81,7 +81,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'num_components':num_components,
             'temp':temp,
             'skip_connection':skip_connection,
-            'latent_overshooting':latent_overshooting
+            'latent_overshooting':latent_overshooting,
+            'soft_targets':soft_targets
         }
         monitor = 'Validation/loss'
     else:
@@ -92,7 +93,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     if load_from_checkpoint:
         checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
         
-        print(f'Loading model from {checkpoint}')
+        print(f'\nLoading model from {checkpoint}')
         model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, lr=lr)
     else:
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
@@ -150,6 +151,7 @@ if __name__=='__main__':
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--latent_overshooting', action='store_true')
+    parser.add_argument('--soft_targets', action='store_true')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())
