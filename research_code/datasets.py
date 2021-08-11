@@ -199,6 +199,7 @@ class DynamicsData(Dataset):
         # traverse backwards through trajectories
         n_data = 0
         cur_frame = len(traj_starts)-1-num_frames
+        done = False
         while cur_frame >= 0:
             if cur_frame < 0:
                 break
@@ -221,15 +222,14 @@ class DynamicsData(Dataset):
                 n_data += 1
                 if n_data >= num_data:
                     break
-            else:
-                # decrease frames
-                cur_frame -= num_frames
+
+            # decrease frames
+            cur_frame -= num_frames
 
         self.actions = np.array(new_actions)
         self.pov_obs = np.array(new_pov_obs)
         self.vec_obs = np.array(new_vec_obs)
         self.rewards = np.array(new_rewards)
-
 
     def __len__(self):
         return len(self.actions)

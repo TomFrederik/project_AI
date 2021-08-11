@@ -23,7 +23,7 @@ STR_TO_MODEL = {
     'mdn':dynamics_models.MDN_RNN
 }
 
-def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
+def train_DynamicsModel(env_name, data_dir, seq_len, lr, 
                         val_perc, batch_size, num_data, epochs, 
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, num_components, skip_connection,
@@ -31,7 +31,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         latent_overshooting, soft_targets, profile, temp, regression):
     
     # make sure that relevant dirs exist
-    run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
+    run_name = f'DynamicsModel/{dynamics_models.MDN_RNN.__name__}/{env_name}'
     log_dir = os.path.join(log_dir, run_name)
     os.makedirs(log_dir, exist_ok=True)
     print(f'\nSaving logs and model to {log_dir}')
@@ -40,63 +40,31 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     optim_kwargs = {'lr':lr}
     scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
     
-    if dynamics_model == 'node':
-        seq_len = seq_len
-        hidden_dims = [512,512,512]
-        base_model_class = dynamics_models.DynamicsBaseModel
-        base_model_kwargs = {'input_dim':256, 'hidden_dims':hidden_dims}
-        
-        model_kwargs = {
-            'base_model_class':base_model_class, 
-            'base_model_kwargs':base_model_kwargs, 
-            'seq_len':seq_len, 
-            'VAE_path':model_path,
-            'optim_kwargs':optim_kwargs,
-            'scheduler_kwargs':scheduler_kwargs
-        }
-        monitor = 'Validation/loss'
-    elif dynamics_model == 'rssm':
-        seq_len = seq_len        
-        lstm_kwargs = {'num_layers':1, 'hidden_size':2048}
-        model_kwargs = {
-            'lstm_kwargs':lstm_kwargs, 
-            'seq_len':seq_len, 
-            'VAE_path':model_path,
-            'optim_kwargs':optim_kwargs,
-            'scheduler_kwargs':scheduler_kwargs,
-            'VAE_class':VAE_class,
-            'latent_overshooting':latent_overshooting
-        }
-        monitor = 'Validation/loss'
-    elif dynamics_model == 'mdn':
-        seq_len = seq_len        
-        gru_kwargs = {'num_layers':1, 'hidden_size':1024}
-        model_kwargs = {
-            'gru_kwargs':gru_kwargs, 
-            'seq_len':seq_len, 
-            'VAE_path':model_path,
-            'optim_kwargs':optim_kwargs,
-            'scheduler_kwargs':scheduler_kwargs,
-            'VAE_class':VAE_class,
-            'num_components':num_components,
-            'temp':temp,
-            'skip_connection':skip_connection,
-            'latent_overshooting':latent_overshooting,
-            'soft_targets':soft_targets,
-        }
-        monitor = 'Validation/loss'
-    else:
-        ValueError(f"Unrecognized model {dynamics_model}")
-    ##
+    seq_len = seq_len        
+    gru_kwargs = {'num_layers':1, 'hidden_size':1024}
+    model_kwargs = {
+        'gru_kwargs':gru_kwargs, 
+        'seq_len':seq_len, 
+        'VAE_path':model_path,
+        'optim_kwargs':optim_kwargs,
+        'scheduler_kwargs':scheduler_kwargs,
+        'VAE_class':VAE_class,
+        'num_components':num_components,
+        'temp':temp,
+        'skip_connection':skip_connection,
+        'latent_overshooting':latent_overshooting,
+        'soft_targets':soft_targets,
+    }
+    monitor = 'Validation/loss'
 
     # init model
     if load_from_checkpoint:
         checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
         
         print(f'\nLoading model from {checkpoint}')
-        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, lr=lr)
+        model = STR_TO_MODEL['mdn'].load_from_checkpoint(checkpoint, lr=lr)
     else:
-        model = STR_TO_MODEL[dynamics_model](**model_kwargs)
+        model = STR_TO_MODEL['mdn'](**model_kwargs)
 
     # load data
     data = datasets.DynamicsData(env_name, data_dir, seq_len, num_data)
@@ -131,19 +99,18 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--model_path', help='Path to encoding model')
-    parser.add_argument('--data_dir')
-    parser.add_argument('--log_dir')
-    parser.add_argument('--env_name')
-    parser.add_argument('--dynamics_model', default='rssm', choices=['rssm', 'node', 'mdn'], help='Model used to predict the next latent state')
+    parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
+    parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
+    parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
     parser.add_argument('--seq_len', default=4, type=int)
-    parser.add_argument('--batch_size', default=2, type=int)
-    parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
+    parser.add_argument('--batch_size', default=1, type=int)
+    parser.add_argument('--num_data', default=2, type=int, help='Number of datapoints to use')
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
-    parser.add_argument('--lr_gamma', default=1, type=float, help='Learning rate adjustment factor')
+    parser.add_argument('--lr_gamma', default=0.5, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
-    parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
+    parser.add_argument('--val_perc', default=0.5, type=float, help='How much of the data should be used for validation')
     parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet', 'vqvae'])
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
     parser.add_argument('--skip_connection', action='store_true', help='Whether to use skip connection in MDN-RNN.')

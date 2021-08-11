@@ -32,6 +32,7 @@ class VQVAEQuantize(nn.Module):
 
         self.proj = nn.Conv2d(num_hiddens, embedding_dim, 1)
         self.embed = nn.Embedding(n_embed, embedding_dim)
+        #print(self.embed.weight.shape) # n_embed x embedding_dim
 
         self.register_buffer('data_initialized', torch.zeros(1))
 
@@ -80,7 +81,12 @@ class VQVAEQuantize(nn.Module):
 
     def embed_code(self, embed_id):
         return F.embedding(embed_id, self.embed.weight)
-
+    
+    def embed_one_hot(self, embed_vec):
+        '''
+        embed vec is of shape (B * T * H * W, n_embed)
+        '''
+        return embed_vec @ self.embed.weight
 
 class GumbelQuantize(nn.Module):
     """
