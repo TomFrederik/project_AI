@@ -190,7 +190,8 @@ class DynamicsData(Dataset):
         actions, pov_obs, vec_obs, rewards, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts'] 
 
         num_frames = seq_len
-
+        print(f'\nNumber of frames (conditioning + sequence) = {num_frames}')
+        
         new_actions = []
         new_pov_obs = []
         new_vec_obs = []

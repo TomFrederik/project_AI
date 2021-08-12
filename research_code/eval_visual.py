@@ -26,17 +26,9 @@ def get_tensors(traj, idx, device):
 def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    args = argparse.Namespace(**{
-        'n_hid':256,
-        'num_embeddings':1024,
-        'embedding_dim':256,
-        'vq_flavor':'vqvae',
-        'loss_flavor':'l2',
-        'enc_dec_flavor':'deepmind'
-    })
+    
     # load model
-    model = STR_TO_MODEL[model_class].load_from_checkpoint(model_path, args=args).to(device)
+    model = STR_TO_MODEL[model_class].load_from_checkpoint(model_path).to(device)
 
     # load a single trajectory
     env = data.make(env_name, data_dir)

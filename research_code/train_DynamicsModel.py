@@ -28,7 +28,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, num_components, skip_connection,
                         val_check_interval, load_from_checkpoint, version_dir,
-                        latent_overshooting, soft_targets, profile, temp, regression):
+                        latent_overshooting, soft_targets, profile, temp, regression,
+                        conditioning_len):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
@@ -83,6 +84,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'skip_connection':skip_connection,
             'latent_overshooting':latent_overshooting,
             'soft_targets':soft_targets,
+            'conditioning_len':conditioning_len
         }
         monitor = 'Validation/loss'
     else:
@@ -99,7 +101,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
-    data = datasets.DynamicsData(env_name, data_dir, seq_len, num_data)
+    data = datasets.DynamicsData(env_name, data_dir, seq_len + conditioning_len, num_data)
     lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
     train_data, val_data = random_split(data, lengths)
     train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=6, pin_memory=True)
@@ -154,6 +156,7 @@ if __name__=='__main__':
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--regression', action='store_true', help='Whether to perform regression or KL minimization')
     parser.add_argument('--temp', default=1, type=float)
+    parser.add_argument('--conditioning_len', default=0, type=int, help='Length of sequence to condition rnn on')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())

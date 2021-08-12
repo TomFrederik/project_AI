@@ -36,7 +36,7 @@ class MDN_RNN(pl.LightningModule):
     def __init__(self, gru_kwargs, optim_kwargs, scheduler_kwargs, 
                  seq_len, num_components, VAE_path, 
                  VAE_class='Conv', skip_connection=True, latent_overshooting=False,
-                 soft_targets=False, temp=1, regression=False):
+                 soft_targets=False, temp=1, regression=False, conditioning_len=0):
         super().__init__()
         
         # save params
@@ -49,6 +49,8 @@ class MDN_RNN(pl.LightningModule):
         if self.hparams.VAE_class == 'vqvae':
             self.latent_dim = self.VAE.hparams.args.embedding_dim
             self.num_embeddings = self.VAE.hparams.args.num_embeddings
+            print(f'\nlatent_dim = {self.latent_dim}')
+            print(f'\nnum_embeddings = {self.num_embeddings}')
             #print(self.VAE.encoder(torch.ones(2,3,64,64).float().to(self.VAE.device)).shape)
             #raise ValueError
             dummy = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))[0]
@@ -90,7 +92,7 @@ class MDN_RNN(pl.LightningModule):
         self.gru = nn.GRU(**gru_kwargs, input_size=gru_input_dim, batch_first=True)
         
         if self.hparams.VAE_class == 'vqvae':
-            self.mdn_network = nn.Sequential(
+            self.mdn_network = nn.Sequential( #+self.pre_gru_channels
                     nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=1024, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
                     nn.GELU(),
                     nn.ConvTranspose2d(in_channels=1024, out_channels=512, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
@@ -121,53 +123,47 @@ class MDN_RNN(pl.LightningModule):
         # unpack batch
         pov, vec, actions, _ = batch
 
-        # predict distribution over next state and sample
-        pov_dist_list, pov_sample_list, target = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
-        
+        pov_dist_list, pov_sample_list, target_list = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
+
         # Compute loss over all time horizons
         loss = 0
         T = self.hparams.seq_len-1
         loss_list = []
+        entropy_list = []
         for t in range(T):
+            cur_pov_target = target_list['pov'][:,t]
+
             if self.hparams.regression:
-                # extract from list
-                # For latent overshooting, those are the prior means/logstd/mix_coeffs predicted for state t, 
-                # starting from different starting states t' < t.
-                pov_samples = pov_sample_list[t] # (b t embed_dim latent_size)
-                # target is the ground truth state at time t, which should be compared to prediction which started from time t
-                cur_pov_target = target['pov'][:,t] 
-                #print(f'cur_pov_target.shape = {cur_pov_target.shape}')
                 # compute cosine sim loss
+                pov_samples = pov_sample_list[t]
                 cur_loss = (pov_samples - cur_pov_target) ** 2
                 cur_loss /= cur_loss.sum(dim=[2,3]) # divide by vector norm
                 cur_loss = cur_loss.sum(dim=1).mean()
                 
             else:
-                # extract from list
-                # For latent overshooting, those are the prior means/logstd/mix_coeffs predicted for state t, 
-                # starting from different starting states t' < t.
-                pov_dist = pov_dist_list[t] # (B*latent_size, num_starting_states_leading_to_this_one, N_c)
-                #print(f'pov_dist.shape = {pov_dist.shape}')
+                pov_dist = pov_dist_list[t]
                 pov_dist = einops.rearrange(pov_dist, 'b t num_embed latent_size -> b num_embed latent_size t')#, latent_size=self.latent_size)
                 #print(f'pov_dist.shape = {pov_dist.shape}')
                 # target is the ground truth state at time t, which should be compared to prediction which started from time t
-                cur_pov_target = target['pov'][:,t] 
-                if self.hparams.soft_targets:
-                    cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size num_embeds -> b num_embeds latent_size t', t=pov_dist.shape[-1])
-                else:
-                    cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size -> b latent_size t', t=pov_dist.shape[-1])
                 #print(f'cur_pov_target.shape = {cur_pov_target.shape}')
 
                 if self.hparams.soft_targets:
-                    cur_loss = -einops.reduce(cur_pov_target.detach() * nn.LogSoftmax(dim=1)(pov_dist), 'b num_embeds latent_size t -> b', 'sum').mean()
+                    raise NotImplementedError
+                    #cur_loss = -einops.reduce(cur_pov_target.detach() * nn.LogSoftmax(dim=1)(-pov_dist), 'b num_embeds latent_size t -> b', 'sum').mean()
                 else:
-                    cur_loss = nn.CrossEntropyLoss()(pov_dist, cur_pov_target)
-            
+                    cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size -> b latent_size t', t=pov_dist.shape[-1])
+                    cur_loss = nn.CrossEntropyLoss()(-pov_dist, cur_pov_target)
+
+                # compute entropy for logging
+                #probs = torch.softmax(-pov_dist, dim=1)
+                #entropy = - (probs * torch.log(probs)).sum(dim=1).mean()
+                entropy = 0
             loss += cur_loss/T
             loss_list.append(cur_loss)
+            entropy_list.append(entropy)
             #print(f'loss.shape = {loss.shape}')
         
-        return loss, loss_list
+        return loss, loss_list, entropy_list
 
     def forward(self, pov, vec, actions, h0=None, latent_overshooting=False):
         '''
@@ -185,7 +181,7 @@ class MDN_RNN(pl.LightningModule):
             target - ([B], T-1, latent_dim + vec_dim) sample of ground truth encoding
         '''
         
-        h_t = h0
+        last_hidden = h0
 
         # merge frames with batch
         b = pov.shape[0]
@@ -202,13 +198,32 @@ class MDN_RNN(pl.LightningModule):
             # to do it like in paper, we just use a sample as target
             _, _, pov_sample = self.VAE.encode_only(pov) 
 
+        pov_sample = einops.rearrange(pov_sample, '(b t) c h w -> b t c h w', t=self.hparams.seq_len+self.hparams.conditioning_len)
+        # condition on previous sequence to prime the RNN
+        if self.hparams.conditioning_len > 0:
+            if self.conv_net is None:
+                raise NotImplementedError
+            else:
+                condition_states = pov_sample[:,:self.hparams.conditioning_len]
+                condition_states = self.conv_net(einops.rearrange(condition_states, 'b t c h w -> (b t) c h w'))
+                condition_states = einops.rearrange(condition_states, '(b t) c h w -> b t (c h w)', t=self.hparams.conditioning_len)
+                condition_actions = actions[:,:self.hparams.conditioning_len]
+                gru_input = torch.cat([condition_states, condition_actions], dim=2)
+                if last_hidden is None:
+                    hidden_seq, last_hidden = self.gru(gru_input)
+                else:
+                    hidden_seq, last_hidden = self.gru(gru_input, last_hidden)
+            
+        states = einops.rearrange(pov_sample[:,self.hparams.conditioning_len:], 'b t c h w -> b t c (h w)')
+        actions = actions[:,self.hparams.conditioning_len:]
+        
+        
         # split frames from batch again
-        pov_sample = einops.rearrange(pov_sample, '(b t) c h w -> b t c (h w)', b=b)
-        ind = einops.rearrange(ind, '(b t) hw -> b t hw', b=b)
-        #print(f'pov_sample.shape = {pov_sample.shape}')
-
-        states = pov_sample
+        ind = einops.rearrange(ind, '(b t) hw -> b t hw', b=b)[:,self.hparams.conditioning_len:]
         #print(f'ind[:,1:].shape = {ind[:,1:].shape}')
+        #print(f'ind.shape = {ind.shape}')
+        
+
         
         # stack pov and vec to construct target
         if self.hparams.VAE_class == 'vqvae':
@@ -218,7 +233,7 @@ class MDN_RNN(pl.LightningModule):
                 }
             elif self.hparams.soft_targets:
                 # compute probs as softmax(-dist)
-                pov_targets = torch.softmax(-self.VAE.quantizer.get_dist(einops.rearrange(pov_sample[:,1:], 'b t dim hw -> (b hw t) dim')), dim=1)
+                pov_targets = torch.softmax(-self.VAE.quantizer.get_dist(einops.rearrange(states[:,1:], 'b t dim hw -> (b hw t) dim')), dim=1)
                 pov_targets = einops.rearrange(pov_targets, '(b hw t) num_embeds -> b t hw num_embeds', hw=self.latent_size, t=seq_len-1)
                 
                 # make sure probs sum to one
@@ -237,26 +252,26 @@ class MDN_RNN(pl.LightningModule):
             target = torch.cat([pov_sample, vec], dim=-1)
             target = target[:,1:]
 
-        # latent overshooting
         pov_dist_list = []
         pov_sample_list = []
         # compute one-step predictions
-        pov_dist, s_t, h_t = self.forward_latent(states[:,:-1], actions[:,:-1], h_t)
+        pov_dist, sample, hidden_seq = self.one_step_prediction(states[:,:-1], actions[:,:-1], last_hidden)
         #print(f'pov_dist.shape = {pov_dist.shape}')
         #print(f's_t.shape = {s_t.shape}')
         
         # save results to list
         pov_dist_list.extend([[pov_dist[:,i]] for i in range(pov_dist.shape[1])])
-        pov_sample_list.extend([[s_t[:,i]] for i in range(pov_dist.shape[1])])
-
+        pov_sample_list.extend([[sample[:,i]] for i in range(pov_dist.shape[1])])
+        
+        # latent overshooting
         if latent_overshooting:
             #print(f'h_t.shape = {h_t.shape}')    
             # extrapolate/imagine from each state
             for t in range(self.hparams.seq_len-2):
                 cur_actions = actions[:,1+t:]
                 #print(f'actions.shape = {actions.shape}')
-                starting_state = einops.rearrange(states[:,1+t], 'b embed_dim latent_size -> b 1 embed_dim latent_size')
-                h_0 = h_t[:,t,:]
+                starting_state = states[:,1+t]
+                h_0 = hidden_seq[:,t,:]
                 extrapolated_states, extrapolated_pov_dist = self.extrapolate_latent(starting_state, cur_actions, h_0)
                 
                 # save results to lists
@@ -269,10 +284,10 @@ class MDN_RNN(pl.LightningModule):
         for i in range(len(pov_dist_list)):
             pov_dist_list[i] = torch.stack(pov_dist_list[i], dim=1)
             pov_sample_list[i] = torch.stack(pov_sample_list[i], dim=1)
-            
+        
         return pov_dist_list, pov_sample_list, target
             
-    def forward_latent(self, states, actions, h0=None):
+    def one_step_prediction(self, states, actions, h0=None):
         '''
         Helper function which takes (a sample of the current belief over the) current state or a sequence thereof,
         the action taken in that state or states, as well as the current lstm state and computes a belief
@@ -303,39 +318,36 @@ class MDN_RNN(pl.LightningModule):
         #actions = einops.repeat(actions, 'b t act_dim -> b t act_dim latent_size', latent_size=states.shape[-1])
         #actions = actions[...,None].repeat(1,1,1,states.shape[-1])
         #print(f'actions.shape = {actions.shape}')
-
-        gru_input = torch.cat([new_states, actions], dim=2)
-        #print(f'gru_input.shape = {gru_input.shape}') # b t (c h w + a)
         
         # compute hidden states of gru
         if h0 is None:
-            h_t, h_n = self.gru(gru_input)
+            hidden_states_seq, _ = self.gru(torch.cat([new_states, actions], dim=2))
         else:
-            h_t, h_n = self.gru(gru_input, h0)
+            hidden_states_seq, _ = self.gru(torch.cat([new_states, actions], dim=2), h0)
         #print(f'h_t.shape = {h_t.shape}')
         # compute next state
-        mdn_out = self.mdn_network(einops.rearrange(h_t, 'b t d -> (b t) d 1 1'))
+        #mdn_input = torch.cat([new_states, hidden_states_seq], dim=2)
+        pov_pred = self.mdn_network(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d 1 1'))
         #print(f'mdn_out.shape = {mdn_out.shape}') # ((b*t) embedding_dim h w))
 
         if self.hparams.VAE_class == 'vqvae':
             #pov_dist = einops.rearrange(mdn_out, 'bt (num_embeds latent_size) -> (bt latent_size) num_embeds', latent_size=self.latent_size)
-            pov_pred = einops.rearrange(mdn_out, '(b t) embedding_dim h w -> b t embedding_dim (h w)', t=seq_len)
+            pov_pred = einops.rearrange(pov_pred, '(b t) embedding_dim h w -> b t embedding_dim (h w)', t=seq_len)
             #print(f'pov_pred.shape = {pov_pred.shape}')
             # skip connection
             pov_pred += states
             # compute distance and closest embedding vector
             pov_dist = self.VAE.quantizer.get_dist(einops.rearrange(pov_pred, 'b t embedding_dim latent_size -> (b t latent_size) embedding_dim'))
             #print(f'pov_dist.shape = {pov_dist.shape}') # b*t*h*w num_embeddings
-            one_hot_ind = nn.functional.gumbel_softmax(pov_dist, dim=-1, tau=self.hparams.temp, hard=True)
-            z_q = self.VAE.quantizer.embed_one_hot(one_hot_ind)
+            one_hot_ind = nn.functional.gumbel_softmax(-pov_dist, dim=-1, tau=self.hparams.temp, hard=True)
+            state = self.VAE.quantizer.embed_one_hot(one_hot_ind)
             #ind = torch.argmax(torch.softmax(pov_dist, dim=-1), dim=-1)
             #ind = torch.distributions.categorical.Categorical(probs=torch.softmax(-pov_dist/self.hparams.temp, dim=-1)).sample()
             #z_q = self.VAE.quantizer.embed_code(ind)
-            #print(f'z_q.shape = {z_q.shape}') # bthw embed_dim
             #print(f'ind.shape = {ind.shape}')
             pov_dist = einops.rearrange(pov_dist, '(b t latent_size) num_embeds -> b t num_embeds latent_size', t=seq_len, latent_size=self.latent_size)
-            s_t = einops.rearrange(z_q, '(b t latent_size) embed_dim -> b t embed_dim latent_size', latent_size=self.latent_size, t=seq_len)
-            return pov_dist, s_t, h_t
+            state = einops.rearrange(state, '(b t latent_size) embed_dim -> b t embed_dim latent_size', latent_size=self.latent_size, t=seq_len)
+            return pov_dist, state, hidden_states_seq
         else:
             raise NotImplementedError
 
@@ -343,7 +355,7 @@ class MDN_RNN(pl.LightningModule):
         '''
         Extrapolate from starting state conditional on actions and pre-existing lstm states
         Args:
-            state - ([B], 1, 64 + latent_dim)
+            state - ([B], 64 + latent_dim)
             actions - ([B], T', 64), where T' is the number of steps the function will extrapolate
         Returns:
             extrapolated_states - ([B], T', num_components * (64 + latent_dim))
@@ -367,37 +379,23 @@ class MDN_RNN(pl.LightningModule):
         #print(f'c_n.shape = {c_n.shape}')
         for t in range(steps):
             if self.conv_net is not None:
-                new_state = self.conv_net(einops.rearrange(state, 'b t c (h w) -> (b t) c h w', h=self.latent_h))
-                new_state = einops.rearrange(new_state, '(b t) c h w -> b t (c h w)', t=1)
+                new_state = self.conv_net(einops.rearrange(state, 'b c (h w) -> b c h w', h=self.latent_h))
+                new_state = einops.rearrange(new_state, 'b c h w -> b (c h w)')
                 #print(f'state.shape = {state.shape}')
             #print(f'state.shape = {state.shape}')
             #print(f'new_state.shape = {new_state.shape}')
                 
-            action = actions[:,t][:,None,:]
-            #print(f'state.shape = {state.shape}')
 
             if t == 0 and self.conv_net is None:
-                new_state = einops.rearrange(new_state, 'b t embed_dim latent_size -> b t (embed_dim latent_size)')
+                new_state = einops.rearrange(new_state, 'b embed_dim latent_size -> b (embed_dim latent_size)')
             #print(f'state.shape = {state.shape}')
             #print(f'action.shape = {action.shape}')
             
-            #action = einops.repeat(action, 'b t d -> (b latent_size) t d', latent_size=self.latent_size)
-            #print(f'action.shape = {action.shape}')
-            #raise ValueError
-            gru_input = torch.cat([new_state, action], dim=2)
-            #print(f'lstm_input.shape = {lstm_input.shape}')
-            #lstm_input = einops.rearrange(lstm_input, 'b t D latent_size -> (b latent_size) t D')
-            #print(f'lstm_input.shape = {lstm_input.shape}')
-            #print(f'h_n.shape = {h_n.shape}')
-            #print(f'c_n.shape = {c_n.shape}')
-            h_t, h_n = self.gru(gru_input, h_n)
-            #print(f'h_t.shape = {h_t.shape}') # b 1 D --> drop first dimension
-            h_t = h_t[:,0]
-            
-            #print(f'h_t.shape = {h_t.shape}')
+            _, h_n = self.gru(torch.cat([new_state, actions[:,t]], dim=1)[:,None], h_n)
             
             # compute next state
-            mdn_out = self.mdn_network(einops.rearrange(h_t, 'b D -> b D 1 1'))
+            #mdn_input = torch.cat([new_state, h_n], dim=1)
+            pov_pred = self.mdn_network(einops.rearrange(h_n[0], 'b d -> b d 1 1'))
 
             #print(f'mdn_out.shape = {mdn_out.shape}')
             #print(f'pov_dist.shape = {pov_dist.shape}')
@@ -405,31 +403,25 @@ class MDN_RNN(pl.LightningModule):
             
             if self.hparams.VAE_class == 'vqvae':
                 #pov_dist = einops.rearrange(mdn_out, 'bt (num_embeds latent_size) -> (bt latent_size) num_embeds', latent_size=self.latent_size)
-                pov_pred = einops.rearrange(mdn_out, 'b embedding_dim h w -> b embedding_dim (h w)')
+                pov_pred = einops.rearrange(pov_pred, 'b embedding_dim h w -> b embedding_dim (h w)')
                 # skip connection
-                pov_pred += einops.rearrange(state, 'b t embedding_dim latent_size -> (b t) embedding_dim latent_size')
+                pov_pred += state
                 #print(f'pov_pred.shape = {pov_pred.shape}')
                 # compute distance and closest embedding vector
                 pov_dist = self.VAE.quantizer.get_dist(einops.rearrange(pov_pred, 'b embedding_dim latent_size -> (b latent_size) embedding_dim'))
                 #print(f'pov_dist.shape = {pov_dist.shape}') 
                 # sample from gumbel softmax to still have gradients
-                one_hot_ind = nn.functional.gumbel_softmax(pov_dist, dim=-1, tau=self.hparams.temp, hard=True)
-                z_q = self.VAE.quantizer.embed_one_hot(one_hot_ind)
-                #ind = torch.argmax(torch.softmax(pov_dist, dim=-1), dim=-1)
-                #ind = torch.distributions.categorical.Categorical(probs=torch.softmax(-pov_dist/self.hparams.temp, dim=-1)).sample()
-                #z_q = self.VAE.quantizer.embed_code(ind)
-                #print(f'z_q.shape = {z_q.shape}')
-                #print(f'ind.shape = {ind.shape}')
-                s_t = einops.rearrange(z_q, '(bt latent_size) embed_dim -> bt embed_dim latent_size', latent_size=self.latent_size)
-                state = einops.rearrange(s_t, '(b t) embed_dim latent_size -> b t embed_dim latent_size', t=1)
+                one_hot_ind = nn.functional.gumbel_softmax(-pov_dist, dim=-1, tau=self.hparams.temp, hard=True)
+                pov_dist = einops.rearrange(pov_dist, '(b latent_size) num_embeds -> b num_embeds latent_size', latent_size=self.latent_size)
+                state = self.VAE.quantizer.embed_one_hot(one_hot_ind)
+                state = einops.rearrange(state, '(b latent_size) embed_dim -> b embed_dim latent_size', latent_size=self.latent_size)
                 #print(f'state.shape = {state.shape}')
             else:
                 raise NotImplementedError
             
-            pov_dist = einops.rearrange(pov_dist, '(b latent_size) num_embeds -> b num_embeds latent_size', latent_size=self.latent_size)
             #print(f'pov_dist.shape = {pov_dist.shape}')
 
-            extrapolated_states.append(s_t)
+            extrapolated_states.append(state)
             extrapolated_pov_dist.append(pov_dist)
         
         extrapolated_states = torch.stack(extrapolated_states, dim=1)
@@ -455,25 +447,25 @@ class MDN_RNN(pl.LightningModule):
         #print(states.shape)
         states = einops.rearrange(states, 't embed_dim h w-> 1 t embed_dim (h w)')
         actions = einops.rearrange(actions, 't act_dim -> 1 t act_dim')
-        _, states, h_n = self.forward_latent(states, actions[:,:-horizon], h0=None)
+        _, states, h_n = self.one_step_prediction(states, actions[:,:-horizon], h0=None)
         #print(f'h_n.shape = {h_n.shape}')
         h_n = h_n[:,-1]
 
-        state = einops.rearrange(states[:,-1], 'b embed_dim latent_size -> b 1 embed_dim latent_size')
+        state = states[:,-1]
         #print(state.shape)
         #print(f'h_n.shape = {h_n.shape}')
         # extrapolate
         predicted_states, _ = self.extrapolate_latent(state, actions[-horizon:], h0=h_n)
         #print(f'predicted_states.shape = {predicted_states.shape}')
         #print(f'state.shape = {state.shape}')
-        predicted_states = torch.cat([state, predicted_states], dim=1)
+        predicted_states = torch.cat([state[:,None], predicted_states], dim=1)
         predicted_states = einops.rearrange(predicted_states, 'b t embed_dim (h w) -> b t embed_dim h w', h=h, w=h)[0]
         #print(f'predicted_states.shape = {predicted_states.shape}')
         return predicted_states
 
     def training_step(self, batch, batch_idx):
         # perform predictions and compute loss
-        loss, loss_list = self._step(batch)
+        loss, loss_list, entropy_list = self._step(batch)
         #loss_z, loss_v = self._step(batch)
         #loss = loss_z #+ loss_v # TODO re-enable v-loss backprop
         # score and log predictions
@@ -490,7 +482,7 @@ class MDN_RNN(pl.LightningModule):
         
     def validation_step(self, batch, batch_idx):
         # perform predictions and compute loss
-        loss, loss_list = self._step(batch)
+        loss, loss_list, entropy_list = self._step(batch)
         #loss_z, loss_v = self._step(batch)
         #loss = loss_z #+ loss_v # TODO re-enable v-loss backprop
         # score and log predictions
