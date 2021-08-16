@@ -30,7 +30,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         val_check_interval, load_from_checkpoint, version_dir,
                         latent_overshooting, soft_targets, profile, temp, regression,
                         conditioning_len, curriculum_threshold, curriculum_start,
-                        predict_idcs_directly):
+                        predict_idcs_directly, embed):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
@@ -88,7 +88,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'conditioning_len':conditioning_len,
             'curriculum_threshold':curriculum_threshold,
             'curriculum_start':curriculum_start,
-            'predict_idcs_directly':predict_idcs_directly
+            'predict_idcs_directly':predict_idcs_directly,
+            'embed':embed
         }
         monitor = 'Validation/loss'
     else:
@@ -158,6 +159,7 @@ if __name__=='__main__':
     parser.add_argument('--latent_overshooting', action='store_true')
     parser.add_argument('--soft_targets', action='store_true')
     parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--embed', action='store_true')
     parser.add_argument('--predict_idcs_directly', action='store_true', help='Whether to predict embedding idcs directly or predict vectors which are then mapped to their closes idx')
     parser.add_argument('--regression', action='store_true', help='Whether to perform regression or KL minimization')
     parser.add_argument('--temp', default=1, type=float)

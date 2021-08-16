@@ -8,6 +8,7 @@ to backpropagate through the sampling process.
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
+import einops
 
 from scipy.cluster.vq import kmeans2
 
@@ -55,7 +56,8 @@ class VQVAEQuantize(nn.Module):
 
         dist = self.get_dist(flatten)
         _, ind = (-dist).max(1)
-        ind = ind.view(B, H, W)
+        ind = einops.rearrange(ind, '(B H W) -> B H W', B=B, H=H, W=W)
+        log_priors = nn.functional.log_softmax(einops.rearrange((-dist), '(B H W) D -> B D H W', B=B, H=H, W=W), dim=1)
 
         # vector quantization cost that trains the embedding vectors
         z_q = self.embed_code(ind) # (B, H, W, C)
@@ -65,7 +67,7 @@ class VQVAEQuantize(nn.Module):
 
         z_q = z_e + (z_q - z_e).detach() # noop in forward pass, straight-through gradient estimator in backward pass
         z_q = z_q.permute(0, 3, 1, 2) # stack encodings into channels again: (B, C, H, W)
-        return z_q, diff, ind
+        return z_q, diff, ind, log_priors
 
     def get_dist(self, flat_z):
         '''

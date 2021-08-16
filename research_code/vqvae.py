@@ -30,7 +30,7 @@ import datasets
 # -----------------------------------------------------------------------------
 class VQVAE_new(pl.LightningModule):
 
-    def __init__(self, vq_flavor, enc_dec_flavor, embedding_dim, n_hid, num_embeddings, loss_flavor, input_channels=3):
+    def __init__(self, vq_flavor, enc_dec_flavor, embedding_dim, n_hid, num_embeddings, loss_flavor, input_channels=3, pre_latent_batchnorm=False):
         super().__init__()
         self.save_hyperparameters()
 
@@ -40,8 +40,12 @@ class VQVAE_new(pl.LightningModule):
             'openai': (OpenAIEncoder, OpenAIDecoder),
         }[enc_dec_flavor]
         self.encoder = Encoder(input_channels=input_channels, n_hid=n_hid)
+        # pre latent batchnorm
+        if pre_latent_batchnorm:
+            self.batchnorm = nn.BatchNorm2d(2*n_hid)
         self.decoder = Decoder(n_init=embedding_dim, n_hid=n_hid, output_channels=input_channels)
 
+        
         # the quantizer module sandwiched between them, +contributes a KL(posterior || prior) loss to ELBO
         QuantizerModule = {
             'vqvae': VQVAEQuantize,
@@ -59,6 +63,8 @@ class VQVAE_new(pl.LightningModule):
 
     def forward(self, x):
         z = self.encoder(x)
+        if self.hparams.pre_latent_batchnorm:
+            z = self.batchnorm(z)
         z_q, latent_loss, ind = self.quantizer(z)
         x_hat = self.decoder(z_q)
         return x_hat, latent_loss, ind
@@ -66,6 +72,8 @@ class VQVAE_new(pl.LightningModule):
     @torch.no_grad()
     def reconstruct_only(self, x):
         z = self.encoder(self.recon_loss.inmap(x))
+        if self.hparams.pre_latent_batchnorm:
+            z = self.batchnorm(z)
         z_q, _, _ = self.quantizer(z)
         x_hat = self.decoder(z_q)
         x_hat = self.recon_loss.unmap(x_hat)
@@ -85,6 +93,8 @@ class VQVAE_new(pl.LightningModule):
         '''
         # encode
         z = self.encoder(x)
+        if self.hparams.pre_latent_batchnorm:
+            z = self.batchnorm(z)
         z_q, _, ind = self.quantizer(z)
 
         return z_q, ind
@@ -207,8 +217,8 @@ class VQVAE(pl.LightningModule):
     @torch.no_grad()
     def encode_only(self, x):
         z = self.encoder(self.recon_loss.inmap(x))
-        z_q, _, ind = self.quantizer(z)
-        return z_q, ind
+        z_q, _, ind, log_priors = self.quantizer(z)
+        return z_q, ind, log_priors
 
     def training_step(self, batch, batch_idx):
         img = batch[1]
@@ -393,6 +403,8 @@ def cli_main():
     parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
     parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
     parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
+    # other model args
+    parser.add_argument('--pre_latent_batchnorm', action='store_true')
 # dataloader related
     parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
     parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
@@ -421,7 +433,8 @@ def cli_main():
             'embedding_dim':args.embedding_dim, 
             'n_hid':args.n_hid, 
             'num_embeddings':args.num_embeddings,
-            'loss_flavor':args.loss_flavor
+            'loss_flavor':args.loss_flavor,
+            'pre_latent_batchnorm':pre_latent_batchnorm
         })
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')
