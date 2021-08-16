@@ -36,12 +36,17 @@ class MDN_RNN(pl.LightningModule):
     def __init__(self, gru_kwargs, optim_kwargs, scheduler_kwargs, 
                  seq_len, num_components, VAE_path, 
                  VAE_class='Conv', skip_connection=True, latent_overshooting=False,
-                 soft_targets=False, temp=1, regression=False, conditioning_len=0):
+                 soft_targets=False, temp=1, regression=False, conditioning_len=0,
+                 curriculum_threshold=3.0, curriculum_start=0):
         super().__init__()
         
         # save params
         self.save_hyperparameters()
 
+        # init curriculum
+        self._init_curriculum(curriculum_start=curriculum_start)
+        print(f'\nCurriculum starts at {self.curriculum[self.curriculum_step]} step forecast')
+        
         # load VAE
         self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
         #self.VAE.eval()
@@ -264,7 +269,7 @@ class MDN_RNN(pl.LightningModule):
         pov_sample_list.extend([[sample[:,i]] for i in range(pov_dist.shape[1])])
         
         # latent overshooting
-        if latent_overshooting:
+        if latent_overshooting and self.curriculum[self.curriculum_step] > 0:
             #print(f'h_t.shape = {h_t.shape}')    
             # extrapolate/imagine from each state
             for t in range(self.hparams.seq_len-2):
@@ -367,7 +372,8 @@ class MDN_RNN(pl.LightningModule):
             h_n = h0
         #print(f'h_n.shape = {h_n.shape}')
 
-        steps = actions.shape[1] - 1
+        #steps = actions.shape[1] - 1
+        steps = min(self.curriculum[self.curriculum_step], actions.shape[1]-1)
         b = state.shape[0]
         
         extrapolated_states = []
@@ -442,7 +448,11 @@ class MDN_RNN(pl.LightningModule):
         '''
         assert horizon > 0, f"horizon must be greater 0, but is {horizon}!"
         
+        
+        print('\nSetting curriculum to max!\n')
         seq_len = states.shape[0]
+        self._init_curriculum(seq_len)
+        self.curriculum_step = len(self.curriculum) - 1
         h = states.shape[2]
         #print(states.shape)
         states = einops.rearrange(states, 't embed_dim h w-> 1 t embed_dim (h w)')
@@ -460,7 +470,7 @@ class MDN_RNN(pl.LightningModule):
         #print(f'state.shape = {state.shape}')
         predicted_states = torch.cat([state[:,None], predicted_states], dim=1)
         predicted_states = einops.rearrange(predicted_states, 'b t embed_dim (h w) -> b t embed_dim h w', h=h, w=h)[0]
-        #print(f'predicted_states.shape = {predicted_states.shape}')
+        print(f'predicted_states.shape = {predicted_states.shape}')
         return predicted_states
 
     def training_step(self, batch, batch_idx):
@@ -494,10 +504,14 @@ class MDN_RNN(pl.LightningModule):
         plt.ylabel('Loss')
         self.trainer.logger.experiment.add_figure('Validation/loss_per_frame', figure, self.global_step)
         
-        
         #self.log('Validation/loss_z', loss_z, on_epoch=True)
         #self.log('Validation/loss_v', loss_v, on_epoch=True)
         return loss
+    
+    def validation_epoch_end(self, batch_losses):
+        # check whether to go to next step in curriculum
+        mean_loss = torch.tensor(batch_losses).mean()
+        self._check_curriculum_cond(mean_loss)
     
     def configure_optimizers(self):
         # set up optimizer
@@ -513,6 +527,20 @@ class MDN_RNN(pl.LightningModule):
             'frequency': self.hparams.scheduler_kwargs['lr_decrease_freq'],
         }
         return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
+    
+    def _init_curriculum(self, seq_len=None, curriculum_start=0):
+        if seq_len is None:
+            self.curriculum = [i for i in range(self.hparams.seq_len-2)]
+        else:
+            self.curriculum = [i for i in range(seq_len-2)]
+        self.curriculum_step = curriculum_start
+
+    def _check_curriculum_cond(self, value):
+        if self.curriculum_step < self.hparams.seq_len-2:
+            if value < self.hparams.curriculum_threshold:
+                self.curriculum_step += 1
+                print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
+        
 
 class RSSM(pl.LightningModule):
     def __init__(self, lstm_kwargs, optim_kwargs, scheduler_kwargs, seq_len, use_pretrained=True, VAE_path=None, VAE_class='Conv'):

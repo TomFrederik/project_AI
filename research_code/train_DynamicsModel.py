@@ -29,7 +29,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         model_path, VAE_class, num_components, skip_connection,
                         val_check_interval, load_from_checkpoint, version_dir,
                         latent_overshooting, soft_targets, profile, temp, regression,
-                        conditioning_len):
+                        conditioning_len, curriculum_threshold, curriculum_start):
     
     # make sure that relevant dirs exist
     run_name = f'DynamicsModel/{STR_TO_MODEL[dynamics_model].__name__}/{env_name}'
@@ -84,19 +84,21 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'skip_connection':skip_connection,
             'latent_overshooting':latent_overshooting,
             'soft_targets':soft_targets,
-            'conditioning_len':conditioning_len
+            'conditioning_len':conditioning_len,
+            'curriculum_threshold':curriculum_threshold,
+            'curriculum_start':curriculum_start
         }
         monitor = 'Validation/loss'
     else:
         ValueError(f"Unrecognized model {dynamics_model}")
     ##
-
+    
     # init model
     if load_from_checkpoint:
         checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
         
         print(f'\nLoading model from {checkpoint}')
-        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, lr=lr)
+        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, lr=lr, curriculum_start=curriculum_start)
     else:
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
@@ -156,6 +158,8 @@ if __name__=='__main__':
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--regression', action='store_true', help='Whether to perform regression or KL minimization')
     parser.add_argument('--temp', default=1, type=float)
+    parser.add_argument('--curriculum_threshold', default=3, type=float)
+    parser.add_argument('--curriculum_start', default=0, type=int)
     parser.add_argument('--conditioning_len', default=0, type=int, help='Length of sequence to condition rnn on')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
 
