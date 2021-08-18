@@ -85,13 +85,17 @@ class InventoryPredictor(pl.LightningModule):
         pov, vec_obs, act, targets = batch
         pred = self(pov, vec_obs, act)
         loss = self.loss_fn(pred, targets)
-        self.log('Training/Loss', loss,on_step=True)
+        accuracy = (targets[torch.sigmoid(pred) >= 0.5].sum() + (1 - targets)[torch.sigmoid(pred) < 0.5].sum()) / len(targets) 
+        self.log('Training/Accuracy', accuracy, on_step=True)
+        self.log('Training/Loss', loss, on_step=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
         pov, vec_obs, act, targets = batch
         pred = self(pov, vec_obs, act)
         loss = self.loss_fn(pred, targets)
+        accuracy = (targets[torch.sigmoid(pred) >= 0.5].sum() + (1 - targets)[torch.sigmoid(pred) < 0.5].sum()) / len(targets) 
+        self.log('Validation/Accuracy', accuracy, on_epoch=True)
         self.log('Validation/Loss', loss, on_epoch=True)
         return loss
 
