@@ -38,8 +38,8 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     traj_iter = env.load_data(traj)
 
     # pick some frame
-    idx = 100
-    num_steps = 50
+    idx = 200
+    num_steps = 100
 
     if model_class == 'node':
         # overwrite model timesteps
@@ -62,7 +62,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     # encode pov
     #print(pov.shape)
-    enc_pov = model.VAE.encode_only(pov)[0]
+    enc_pov, _, log_priors = model.VAE.encode_only(pov)
     rec_pov = model.VAE.decode_only(enc_pov).detach()
 
     # prepare model input
@@ -70,7 +70,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     print(f'states.shape = {states.shape}')
     print(f'actions.shape = {actions.shape}')
     if model_class in ['rssm', 'mdn']:
-        predicted_states = model.predict_recursively(states, actions, horizon=num_steps)
+        predicted_states = model.predict_recursively(states, actions, horizon=num_steps, log_priors=log_priors)
         pred_pov = predicted_states
         #pred_vec = predicted_states[:, 128:]
     else:

@@ -101,7 +101,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
         
         print(f'\nLoading model from {checkpoint}')
-        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, lr=lr, curriculum_start=curriculum_start)
+        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, **model_kwargs)
     else:
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 

@@ -6,6 +6,7 @@ import random
 import numpy as np
 import os
 import random
+import einops
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
         'MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0']
@@ -237,8 +238,8 @@ class DynamicsData(Dataset):
     
     def __getitem__(self, idx):
         # transform image to float array
-        pov = torch.stack([tv.transforms.functional.to_tensor(pic) for pic in self.pov_obs[idx]], dim=0).squeeze()
-        pov = pov.numpy().astype(np.float32)
+        pov = (self.pov_obs[idx].astype(np.float32) / 255)
+        pov = einops.rearrange(pov, 't h w c -> t c h w')
 
         vec_obs = self.vec_obs[idx].astype(np.float32)
         act = self.actions[idx].astype(np.float32)

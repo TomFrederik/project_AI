@@ -11,6 +11,8 @@ import util_models
 import vqvae
 from reward_model import RewardMLP
 
+from time import time
+
 vae_model_by_str = {
     'Conv':visual_models.ConvVAE,
     'ResNet':visual_models.ResnetVAE,
@@ -149,7 +151,6 @@ class MDN_RNN(pl.LightningModule):
                 cur_loss = (pov_samples - cur_pov_target) ** 2
                 cur_loss /= cur_loss.sum(dim=[2,3]) # divide by vector norm
                 cur_loss = cur_loss.sum(dim=1).mean()
-                
             else:
                 pov_logits = pov_logits_list[t]
                 pov_logits = einops.rearrange(pov_logits, 'b t num_embed latent_size -> b num_embed latent_size t')#, latent_size=self.latent_size)
@@ -272,7 +273,9 @@ class MDN_RNN(pl.LightningModule):
         pov_logits_list = []
         pov_sample_list = []
         # compute one-step predictions
+        time1 = time()
         pov_logits, sample, hidden_seq = self.one_step_prediction(states[:,:-1], actions[:,:-1], last_hidden, one_step_priors)
+        print(f'Time for one step prediction = {time()-time1}')
         #print(f'pov_dist.shape = {pov_dist.shape}')
         #print(f's_t.shape = {s_t.shape}')emeb
         
@@ -280,11 +283,14 @@ class MDN_RNN(pl.LightningModule):
         pov_logits_list.extend([[pov_logits[:,i]] for i in range(pov_logits.shape[1])])
         pov_sample_list.extend([[sample[:,i]] for i in range(pov_logits.shape[1])])
         
+
         # latent overshooting
+        time0 = time()
         if latent_overshooting and self.curriculum[self.curriculum_step] > 0:
             #print(f'h_t.shape = {h_t.shape}')    
             # extrapolate/imagine from each state
             for t in range(self.hparams.seq_len-2):
+                time1 = time()
                 cur_actions = actions[:,1+t:]
                 #print(f'actions.shape = {actions.shape}')
                 starting_state = states[:,1+t]
@@ -298,7 +304,8 @@ class MDN_RNN(pl.LightningModule):
                     #print(f'extrapolated_pov_dist[:,i].shape = {extrapolated_pov_dist[:,i].shape}')
                     pov_logits_list[t+1+i].append(extrapolated_pov_logits[:,i])
                     pov_sample_list[t+1+i].append(extrapolated_states[:,i])
-
+                print(f'Time in extrapolate latent, t={t}: {time()-time1:.3f}s')
+        print(f'Time for latent overshooting in total: {time() - time0:.3f}')
         # stack lists into tensors
         for i in range(len(pov_logits_list)):
             pov_logits_list[i] = torch.stack(pov_logits_list[i], dim=1)
@@ -324,7 +331,7 @@ class MDN_RNN(pl.LightningModule):
         # concat states and action
         #print(f'states.shape = {states.shape}')
         #print(f'actions.shape = {actions.shape}')
-        seq_len = actions.shape[1]
+        seq_len = states.shape[1]
         
         #print(f'states.shape = {states.shape}')
         if self.conv_net is not None:
@@ -452,7 +459,7 @@ class MDN_RNN(pl.LightningModule):
         return extrapolated_states, extrapolated_pov_logits
 
     @torch.no_grad()
-    def predict_recursively(self, states, actions, horizon):
+    def predict_recursively(self, states, actions, horizon, log_priors):
         '''
         Auto-regressively applies dynamics model. Actions for imagination are supplied, so only states are being predicted
         Input:
@@ -470,13 +477,17 @@ class MDN_RNN(pl.LightningModule):
         self._init_curriculum(seq_len)
         self.curriculum_step = len(self.curriculum) - 1
         h = states.shape[2]
-        #print(states.shape)
-        if self.hparams.predict_idcs_directly:
+        if self.hparams.embed:
             raise NotImplementedError
-            states = einops.rearrange(self.embedding(states), 't embed_dim h w D')
+        
+        one_step_priors = einops.rearrange(log_priors[:-1], 't D h w -> (t h w) D')
+        extrapolating_prior = einops.rearrange(log_priors[-1], 'D h w -> (h w) D')
         states = einops.rearrange(states, 't embed_dim h w-> 1 t embed_dim (h w)')
         actions = einops.rearrange(actions, 't act_dim -> 1 t act_dim')
-        _, states, h_n = self.one_step_prediction(states, actions[:,:-horizon], h0=None)
+        #print(states.shape)
+        #print(log_priors.shape)
+
+        _, states, h_n = self.one_step_prediction(states[:, :-1], actions[:,:-horizon-1], h0=None, log_priors=one_step_priors)
         #print(f'h_n.shape = {h_n.shape}')
         h_n = h_n[:,-1]
 
@@ -484,7 +495,7 @@ class MDN_RNN(pl.LightningModule):
         #print(state.shape)
         #print(f'h_n.shape = {h_n.shape}')
         # extrapolate
-        predicted_states, _ = self.extrapolate_latent(state, actions[-horizon:], h0=h_n)
+        predicted_states, _ = self.extrapolate_latent(state, actions[-horizon-1:], h0=h_n, log_prior=extrapolating_prior)
         #print(f'predicted_states.shape = {predicted_states.shape}')
         #print(f'state.shape = {state.shape}')
         predicted_states = torch.cat([state[:,None], predicted_states], dim=1)
