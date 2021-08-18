@@ -248,6 +248,65 @@ class DynamicsData(Dataset):
         return pov, vec_obs, act, rew
 
 
+class VectorObsData(Dataset):
+
+    def __init__(self, env_name, data_dir, num_data=0):
+        super().__init__()
+
+        print(f'\nLoading data of {env_name} from {data_dir}..')
+        # load data
+        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
+        actions, pov_obs, vec_obs, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['traj_starts'] 
+
+        new_actions = []
+        new_pov_obs = []
+        new_vec_obs = []
+        new_targets = []
+
+        # traverse backwards through trajectories
+        n_data = 0
+        cur_frame = len(traj_starts)-2
+        done = False
+        while cur_frame >= 0:
+            if cur_frame < 0:
+                break
+            
+            # don't skip last frames in an episode
+            if traj_starts[cur_frame+1] == 1:
+                cur_frame -= 1
+                continue
+            
+            new_actions.append(actions[cur_frame])
+            new_pov_obs.append(pov_obs[cur_frame])
+            new_vec_obs.append(vec_obs[cur_frame])
+            new_targets.append(1 if (vec_obs[cur_frame] != vec_obs[cur_frame+1]) else 0)
+            
+            # check if enough data has been collected
+            if num_data > 0:
+                n_data += 1
+                if n_data >= num_data:
+                    break
+        self.actions = np.array(new_actions)
+        self.pov_obs = np.array(new_pov_obs)
+        self.vec_obs = np.array(new_vec_obs)
+        self.targets = np.array(new_targets)
+
+    def __len__(self):
+        return len(self.actions)
+    
+    def __getitem__(self, idx):
+        # transform image to float array
+        pov = (self.pov_obs[idx].astype(np.float32) / 255)
+        pov = einops.rearrange(pov, 'h w c -> c h w')
+
+        vec_obs = self.vec_obs[idx].astype(np.float32)
+        act = self.actions[idx].astype(np.float32)
+        target = self.targets[idx].astype(np.int32)
+
+        return pov, vec_obs, act, target
+
+
+
 class BehavCloneData(Dataset):
 
     def __init__(self, env_name, data_dir):
