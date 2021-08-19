@@ -339,9 +339,11 @@ class PretrainQNetData(Dataset):
         n_step_pov_obs_list = []
         n_step_vec_obs_list = []
 
+        discount_array = np.array([gamma ** i for i in range(n)])
+
         # traverse backwards through trajectories
         n_data = 0
-        cur_frame = len(traj_starts)-2
+        cur_frame = len(traj_starts)-1-n
         done = False
         while cur_frame >= 0:
             if cur_frame < 0:
@@ -358,11 +360,11 @@ class PretrainQNetData(Dataset):
             
             pov_obs_list.append(pov_obs[cur_frame])            
             vec_obs_list.append(vec_obs[cur_frame])
-            actions_list.append(torch.argmin((centroids - actions[cur_frame][None,:]) ** 2))
+            actions_list.append(np.argmin(((centroids - actions[cur_frame][None,:]) ** 2).sum(axis=1)))
             rewards_list.append(rewards[cur_frame])
             next_pov_obs_list.append(pov_obs[cur_frame+1])            
             next_vec_obs_list.append(vec_obs[cur_frame+1])
-            n_step_rewards_list.append(sum([rewards[cur_frame + i] * gamma ** i for i in range(n)]))
+            n_step_rewards_list.append(np.sum(rewards[cur_frame:cur_frame+n] * discount_array))
             n_step_pov_obs_list.append(pov_obs[cur_frame+n])            
             n_step_vec_obs_list.append(vec_obs[cur_frame+n])
             
@@ -371,7 +373,8 @@ class PretrainQNetData(Dataset):
                 n_data += 1
                 if n_data >= num_data:
                     break
-        
+            cur_frame -= 1
+
         self.pov_obs = np.array(pov_obs_list)
         self.vec_obs = np.array(vec_obs_list)
         self.actions = np.array(actions_list)
@@ -400,7 +403,7 @@ class PretrainQNetData(Dataset):
         next_vec_obs = self.next_vec_obs[idx].astype(np.float32)
         n_step_vec_obs = self.n_step_vec_obs[idx].astype(np.float32)
         
-        action = self.actions[idx].astype(np.float32)
+        action = self.actions[idx].astype(np.int64)
         
         reward = self.rewards[idx].astype(np.float32)
         n_step_reward = self.n_step_rewards[idx].astype(np.float32)

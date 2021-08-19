@@ -16,6 +16,7 @@ import datasets
 class PretrainQNetwork(pl.LightningModule):
     
     def __init__(self, vqvae_path, n_actions, optim_kwargs, scheduler_kwargs, target_update_rate, margin, gamma, n):
+        super().__init__()
         self.save_hyperparameters()
         
         # load VAE
@@ -33,7 +34,7 @@ class PretrainQNetwork(pl.LightningModule):
             nn.GELU(),
             nn.Conv2d(in_channels=1024, out_channels=2048, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
         )
-        
+
         # q network
         self.q_net = nn.Sequential(
             nn.Linear(2048 + 64, 512),
@@ -42,7 +43,8 @@ class PretrainQNetwork(pl.LightningModule):
             nn.GELU(),
             nn.Linear(256, 128),
             nn.GELU(),
-            nn.Linear(128, self.hparams.n_actions)
+            nn.Linear(128, self.hparams.n_actions),
+            nn.ELU()
         )
         
         # init target net
@@ -59,26 +61,27 @@ class PretrainQNetwork(pl.LightningModule):
         
     def forward(self, pov, vec_obs, target=False):
         # encode into vqvae latent
-        out, _, _ = self.VAE(pov)
+        out, _, _ = self.VAE.encode_only(pov)
         if target:
             # apply conv feature ext
             out = einops.rearrange(self.target_net['conv_net'](out), 'b c h w -> b (c h w)')
             # apply q network
-            out = self.target_net['q_net'](torch.cat([out, vec_obs], dim=1))
+            out = self.target_net['q_net'](torch.cat([out, vec_obs], dim=1)) + 1
         else:
             # apply conv feature ext
-            out = einops.rearrange(self.conv(out), 'b c h w -> b (c h w)')
+            out = einops.rearrange(self.conv_net(out), 'b c h w -> b (c h w)')
             # apply q network
-            out = self.q_net(torch.cat([out, vec_obs], dim=1))
+            out = self.q_net(torch.cat([out, vec_obs], dim=1)) + 1
         return out
     
     def _large_margin_classification_loss(self, q_values, expert_action):
         '''
         Computes the large margin classification loss J_E(Q) from the DQfD paper
         '''
+        idcs = torch.arange(0,len(q_values),dtype=torch.long)
         q_values = q_values + self.hparams.margin
-        q_values[:,expert_action] = q_values[:,expert_action] - self.hparams.margin
-        return torch.max(q_values, dim=1)[0] - q_values[expert_action]
+        q_values[idcs, expert_action] = q_values[idcs,expert_action] - self.hparams.margin
+        return (torch.max(q_values, dim=1)[0] - q_values[idcs,expert_action]).mean()
     
     def training_step(self, batch, batch_idx):
         pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs = batch
@@ -97,6 +100,8 @@ class PretrainQNetwork(pl.LightningModule):
         loss = classification_loss + one_step_loss + n_step_loss
         
         # logging
+        self.log('Training/1-step TD Error', one_step_loss, on_step=True)
+        self.log('Training/n-step TD Error', n_step_loss, on_step=True)
         self.log('Training/Loss', loss, on_step=True)
         
         return loss
@@ -118,6 +123,8 @@ class PretrainQNetwork(pl.LightningModule):
         loss = classification_loss + one_step_loss + n_step_loss
         
         # logging
+        self.log('Validation/1-step TD Error', one_step_loss, on_epoch=True)
+        self.log('Validation/n-step TD Error', n_step_loss, on_epoch=True)
         self.log('Validation/Loss', loss, on_epoch=True)
         
         return loss
@@ -151,6 +158,7 @@ def main(env_name, batch_size, lr, weight_decay, load_from_checkpoint, version, 
     print(f'\nSaving logs and model to {log_dir}')
 
     # load centroids
+    centroids_path = os.path.join(centroids_path, env_name + '_centroids.npy')
     print(f'\nLoading centroids from {centroids_path}...')
     centroids = np.load(centroids_path)
     print(f'Loaded centroids! Shape is {centroids.shape}.')
@@ -221,14 +229,14 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
-    parser.add_argument('--epochs', default=1, type=int)
+    parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--lr_gamma', default=1, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
-    parser.add_argument('--target_update_rate', default=1, type=int, help='How often to update target network')
-    parser.add_argument('--centroids_path', type=str, default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
+    parser.add_argument('--target_update_rate', default=100, type=int, help='How often to update target network')
+    parser.add_argument('--centroids_path', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
     
     args = parser.parse_args()
     

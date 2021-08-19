@@ -28,10 +28,10 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--data_dir')
-    parser.add_argument('--env_name')
-    parser.add_argument('--n_clusters', default=200, type=int)
-    parser.add_argument('--save_dir')
+    parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
+    parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--n_clusters', default=150, type=int)
+    parser.add_argument('--save_dir', default='/home/lieberummaas/datadisk/minerl/data')
 
     args = vars(parser.parse_args())
 
