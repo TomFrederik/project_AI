@@ -26,20 +26,16 @@ class InventoryPredictor(pl.LightningModule):
                  VAE_class='vqvae'):
         super().__init__()
         self.save_hyperparameters()
-        
+
+        self.loss_fn = nn.BCEWithLogitsLoss()
+
         # load VAE
         self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
-    
-        self.loss_fn = nn.BCEWithLogitsLoss()
         
         dummy, dummy_idcs, _ = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))
-        if self.hparams.predict_idcs_directly and self.hparams.embed:
-            dummy = einops.rearrange(self.embedding(dummy_idcs), 'b h w D -> b D h w')
-        self.latent_h = dummy.shape[-1]
-        self.latent_size = np.prod(dummy.shape[2:])
             
         num_channels = dummy.shape[1]
-        
+
         self.conv_net = nn.Sequential(
             nn.Conv2d(in_channels=num_channels, out_channels=256, kernel_size=3, padding=1, stride=2), # 16 -> 8
             nn.GELU(),
@@ -52,7 +48,7 @@ class InventoryPredictor(pl.LightningModule):
         )
         
         self.mlp = nn.Sequential(
-            nn.Linear(2048, 1024),
+            nn.Linear(2048+128, 1024),
             nn.GELU(),
             nn.Linear(1024, 512),
             nn.GELU(),
@@ -64,20 +60,21 @@ class InventoryPredictor(pl.LightningModule):
         )
         
     def forward(self, pov, vec_obs, act):
-        out, _, _ = self.VAE.encode_only(pov)
-        out = self.conv_net(out)
+        out, _, _ = self.VAE.encode_only(pov)        
+        out = einops.rearrange(self.conv_net(out), 'b c h w -> b (c h w)')
         out = torch.cat([out, vec_obs, act], dim=1)
-        out = self.mlp(out)
+        out = self.mlp(out).squeeze()
+        return out
     
     def configure_optimizers(self):
         # set up optimizer
         optimizer =  AdamW(self.parameters(), **self.hparams.optim_kwargs)
         # set up scheduler
-        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.scheduler_kwargs['lr_gamma'])
+        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])
         lr_dict = {
             'scheduler': lr_scheduler,
-            'interval': self.scheduler_kwargs['lr_step_mode'],
-            'frequency': self.scheduler_kwargs['lr_decrease_freq'],
+            'interval': self.hparams.scheduler_kwargs['lr_step_mode'],
+            'frequency': self.hparams.scheduler_kwargs['lr_decrease_freq'],
         }
         return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
     
@@ -156,15 +153,15 @@ def main(env_name, batch_size, lr, load_from_checkpoint, version, vae_path, data
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
-    p.add_argument('--batch_size', default=100)
-    p.add_argument('--lr', default=3e-4)
+    p.add_argument('--batch_size', default=100, type=int)
+    p.add_argument('--lr', default=3e-4, type=float)
     p.add_argument('--load_from_checkpoint', action='store_true')
     p.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
-    p.add_argument('--model_path', help='Path to encoding model')
+    p.add_argument('--vae_path', help='Path to encoding model')
     p.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
     p.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     p.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
-    p.add_argument('--epochs', default=1, type=int)
+    p.add_argument('--epochs', default=10, type=int)
     p.add_argument('--lr_gamma', default=1, type=float, help='Learning rate adjustment factor')
     p.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     p.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
@@ -174,4 +171,4 @@ if __name__ == '__main__':
     
     args = p.parse_args()
     
-    main(vars(args))
+    main(**vars(args))

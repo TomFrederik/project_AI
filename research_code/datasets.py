@@ -267,29 +267,43 @@ class VectorObsData(Dataset):
         n_data = 0
         cur_frame = len(traj_starts)-2
         done = False
+        
+        print(vec_obs[0])
+        print(vec_obs[-1])
+        rng = np.random.default_rng(42)
         while cur_frame >= 0:
             if cur_frame < 0:
                 break
             
-            # don't skip last frames in an episode
+            # skip last frame in an episode
             if traj_starts[cur_frame+1] == 1:
                 cur_frame -= 1
                 continue
+
+            if (vec_obs[cur_frame] == vec_obs[cur_frame+1]).all():
+                if rng.random() > 0.025/0.975:
+                    cur_frame -= 1
+                    continue
             
             new_actions.append(actions[cur_frame])
             new_pov_obs.append(pov_obs[cur_frame])
             new_vec_obs.append(vec_obs[cur_frame])
-            new_targets.append(1 if (vec_obs[cur_frame] != vec_obs[cur_frame+1]) else 0)
+            new_targets.append(0 if (vec_obs[cur_frame] == vec_obs[cur_frame+1]).all() else 1)
             
             # check if enough data has been collected
             if num_data > 0:
                 n_data += 1
                 if n_data >= num_data:
                     break
+            cur_frame -= 1
+
         self.actions = np.array(new_actions)
         self.pov_obs = np.array(new_pov_obs)
         self.vec_obs = np.array(new_vec_obs)
         self.targets = np.array(new_targets)
+        
+        print(f'\nNumber of positive targets = {np.sum(self.targets)}')
+        print(f'Percentage of positive targets = {np.sum(self.targets)/len(self.targets)}')
 
     def __len__(self):
         return len(self.actions)
@@ -301,7 +315,7 @@ class VectorObsData(Dataset):
 
         vec_obs = self.vec_obs[idx].astype(np.float32)
         act = self.actions[idx].astype(np.float32)
-        target = self.targets[idx].astype(np.int32)
+        target = self.targets[idx].astype(np.float32)
 
         return pov, vec_obs, act, target
 
