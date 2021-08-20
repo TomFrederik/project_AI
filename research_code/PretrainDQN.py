@@ -87,14 +87,17 @@ class PretrainQNetwork(pl.LightningModule):
         pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs = batch
         
         # predict q values
-        pred = self(pov, vec_obs)
-        next_pred = self(next_pov, next_vec_obs, target=True).detach()
-        n_step_pred = self(n_step_pov, n_step_vec_obs, target=True).detach()
+        q_values = self(pov, vec_obs)
+        target_next_q_values = self(next_pov, next_vec_obs, target=True).detach()
+        base_next_action = torch.argmax(self(next_pov, next_vec_obs).detach(), dim=1)
+        target_n_step_q_values = self(n_step_pov, n_step_vec_obs, target=True).detach()
+        base_n_step_action = torch.argmax(self(n_step_pov, n_step_vec_obs).detach(), dim=1)
         
         # compute the individual losses
-        classification_loss = self._large_margin_classification_loss(pred, action)
-        one_step_loss = self.loss_fn(torch.max(pred, dim=1)[0], reward + self.hparams.gamma * torch.max(next_pred, dim=1)[0])
-        n_step_loss = self.loss_fn(torch.max(pred, dim=1)[0], n_step_reward + (self.hparams.gamma ** self.hparams.n) * torch.max(n_step_pred, dim=1)[0])
+        idcs = torch.arange(0, len(q_values), dtype=torch.long)
+        classification_loss = self._large_margin_classification_loss(q_values, action)
+        one_step_loss = self.loss_fn(q_values[idcs, action], reward + self.hparams.gamma * target_next_q_values[idcs, base_next_action])
+        n_step_loss = self.loss_fn(q_values[idcs, action], n_step_reward + (self.hparams.gamma ** self.hparams.n) * target_n_step_q_values[idcs, base_n_step_action])
         
         # sum up losses
         loss = classification_loss + one_step_loss + n_step_loss
@@ -109,15 +112,18 @@ class PretrainQNetwork(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs = batch
         
-        # predict q values
-        pred = self(pov, vec_obs)
-        next_pred = self(next_pov, next_vec_obs, target=True).detach()
-        n_step_pred = self(n_step_pov, n_step_vec_obs, target=True).detach()
+       # predict q values
+        q_values = self(pov, vec_obs)
+        target_next_q_values = self(next_pov, next_vec_obs, target=True).detach()
+        base_next_action = torch.argmax(self(next_pov, next_vec_obs).detach(), dim=1)
+        target_n_step_q_values = self(n_step_pov, n_step_vec_obs, target=True).detach()
+        base_n_step_action = torch.argmax(self(n_step_pov, n_step_vec_obs).detach(), dim=1)
         
         # compute the individual losses
-        classification_loss = self._large_margin_classification_loss(pred, action)
-        one_step_loss = self.loss_fn(torch.max(pred, dim=1)[0], reward + self.hparams.gamma * torch.max(next_pred, dim=1)[0])
-        n_step_loss = self.loss_fn(torch.max(pred, dim=1)[0], n_step_reward + (self.hparams.gamma ** self.hparams.n) * torch.max(n_step_pred, dim=1)[0])
+        idcs = torch.arange(0, len(q_values), dtype=torch.long)
+        classification_loss = self._large_margin_classification_loss(q_values, action)
+        one_step_loss = self.loss_fn(q_values[idcs, action], reward + self.hparams.gamma * target_next_q_values[idcs, base_next_action])
+        n_step_loss = self.loss_fn(q_values[idcs, action], n_step_reward + (self.hparams.gamma ** self.hparams.n) * target_n_step_q_values[idcs, base_n_step_action])
         
         # sum up losses
         loss = classification_loss + one_step_loss + n_step_loss

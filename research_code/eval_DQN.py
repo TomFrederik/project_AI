@@ -40,8 +40,8 @@ def main(env_name, num_runs, centroids_path, model_path, action_repeat, video_di
         
         print(f'\nStarting episode no. {n+1}...')
         print(f'Saving video to {video_dir}')
-        #env = Monitor(gym.make(env_name), video_dir, force=True)
-        env = gym.make(env_name)
+        env = Monitor(gym.make(env_name), video_dir, force=True)
+        #env = gym.make(env_name)
         obs = env.reset()
         done = False
         total_reward = 0
