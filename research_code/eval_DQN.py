@@ -11,7 +11,7 @@ import pytorch_lightning as pl
 import numpy as np
 import einops
 
-import DQN
+import PretrainDQN
 
 def main(env_name, num_runs, centroids_path, model_path, action_repeat, video_dir, epsilon, max_test_episode_len):
 
@@ -19,7 +19,7 @@ def main(env_name, num_runs, centroids_path, model_path, action_repeat, video_di
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # load model
-    model = DQN.PretrainQNetwork.load_from_checkpoint(model_path).to(device)
+    model = PretrainDQN.PretrainQNetwork.load_from_checkpoint(model_path).to(device)
     model.eval()
 
     # load centroids
@@ -32,6 +32,7 @@ def main(env_name, num_runs, centroids_path, model_path, action_repeat, video_di
 
     # create env
     #env = gym.make(env_name)
+    env = Monitor(gym.make(env_name), video_dir, force=True)
     
     # mean reward over all runs
     mean_rew = 0
@@ -40,7 +41,6 @@ def main(env_name, num_runs, centroids_path, model_path, action_repeat, video_di
         
         print(f'\nStarting episode no. {n+1}...')
         print(f'Saving video to {video_dir}')
-        env = Monitor(gym.make(env_name), video_dir, force=True)
         #env = gym.make(env_name)
         obs = env.reset()
         done = False
