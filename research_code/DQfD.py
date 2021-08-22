@@ -15,23 +15,73 @@ import minerl
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error'))
 
+class CombinedMemory(object):
+    def __init__(self, agent_memory_capacity, n_step, gamma, p_offset, alpha, beta):
+        '''
+        Class to combine expert and agent memory
+        '''
+        self.n_step = n_step
+        self.gamma = gamma
+        self.beta = beta
+        self.alpha = alpha
+        self.memory_dict = {
+            'expert':ReplayMemory(None, n_step, gamma, p_offset['expert']),
+            'agent':ReplayMemory(agent_memory_capacity, n_step, gamma, p_offset['agent'])
+        }
+    def __len__(self):
+        return len(self.memory_dict['expert']) + len(self.memory_dict['agent'])
+    
+    def add_episode(self, obs, actions, rewards, td_errors, memory_id):
+        time1 = time()
+        self.memory_dict[memory_id].add_episode(obs, actions, rewards, td_errors)
+        print(f'Time to add episode = {time() - time1:.2f}s')
+    
+        # recompute weights
+        time1 = time()
+        self._update_weights()
+        print(f'Time to update weights = {time() - time1:.2f}s')
+
+    def sample(self, batch_size):
+        idcs = np.random.choice(np.arange(len(self)), size=batch_size, replace=False, p=self.weights)
+        return np.array(np.concatenate([self.memory_dict[key].memory for key in self.memory_dict]))[idcs], idcs
+
+    def update_beta(self, new_beta):
+        for key in self.memory_dict:
+            self.memory_dict[key].update_beta(new_beta)
+    
+    def _update_weights(self):
+        weights = np.array([(sars.td_error + self.memory_dict[key].p_offset) ** self.alpha for sars in self.memory_dict[key].memory for key in self.memory_dict])
+        print(weights.shape)
+        weights /= np.sum(weights)
+        weights = 1 / (len(self) * weights) ** self.beta
+        weights /= np.max(weights)
+        self.weights = weights / np.sum(weights)
+    
+    def update_td_errors(self, idcs, td_errors):
+        time1 = time()
+        for i, idx in enumerate(idcs):
+            if idx < len(self.memory_dict['expert']):
+                self.memory_dict['expert'].memory[idx]._replace(td_error=td_errors[i])
+            else:
+                self.memory_dict['agent'].memory[idx - len(self.memory_dict['expert'])]._replace(td_error=td_errors[i])
+        print(f'Time to update td_errors = {time() - time1:.2f}s')
+        
+        time1 = time()        
+        self._update_weights()
+        print(f'Time to update weights = {time() - time1:.2f}s')
+
+
 class ReplayMemory(object):
 
-    def __init__(self, capacity, n_step, gamma, p_offset, alpha, beta):
+    def __init__(self, capacity, n_step, gamma, p_offset):
         self.n_step = n_step
         self.gamma = gamma
         self.p_offset = p_offset
-        self.alpha = alpha
-        self.beta = beta
         self.memory = deque([],maxlen=capacity)
 
     def push(self, *args):
         """Save a transition"""
         self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        idcs = np.random.choice(np.arange(len(self.memory)), size=batch_size, replace=False, p=self.weights)
-        return np.array(self.memory)[idcs], idcs
 
     def __len__(self):
         return len(self.memory)
@@ -63,21 +113,7 @@ class ReplayMemory(object):
                 td_error
             )
         
-        # recompute weights
-        self._update_weights()
-    
-    def _update_weights(self):
-        weights = np.array([(sars.td_error + self.p_offset)**self.alpha for sars in self.memory])
-        weights /= np.sum(weights)
-        weights = 1 / (len(self) * weights) ** self.beta
-        weights /= np.max(weights)
-        self.weights = weights / np.sum(weights)
-    
-    def update_td_errors(self, idcs, td_errors):
-        for i, idx in enumerate(idcs):
-            self.memory[idx]._replace(td_error = td_errors[i])
-        self._update_weights()
-
+        
     def update_beta(self, new_beta):
         self.beta = new_beta
         
@@ -86,11 +122,7 @@ def extract_pov_vec(state_list):
     vec = np.array([state['vector'] for state in state_list])
     return pov, vec
 
-def load_expert_demo(env_name, data_dir, num_expert_episodes, n_step, gamma, centroids, expert_p_offset, alpha, beta_0):
-    
-    # init expert memory
-    # capacity = None --> unlimited size
-    expert_memory = ReplayMemory(None, n_step, gamma, expert_p_offset, alpha, beta_0)
+def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combined_memory):
     
     # load data
     print(f"Loading data of {env_name}...")
@@ -114,10 +146,10 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, n_step, gamma, cen
         td_errors = np.ones_like(rewards)
 
         # add episode to memory
-        expert_memory.add_episode(obs, actions, rewards, td_errors)
+        combined_memory.add_episode(obs, actions, rewards, td_errors, memory_id='expert')
     print(f'\nLoaded {len(expert_memory)} expert samples!')
 
-    return expert_memory
+    return combined_memory
 
 def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, training_steps_per_iteration,
          lr, n_step, capacity, gamma, action_repeat, epsilon, batch_size, num_expert_episodes, data_dir, save_dir,
@@ -150,9 +182,9 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     
     # init memory
     beta = beta_0
-    memory = ReplayMemory(capacity, n_step, gamma, agent_p_offset, alpha, beta)
+    combined_memory = CombinedMemory(capacity, n_step, gamma, {'agent':agent_p_offset, 'expert':expert_p_offset}, alpha, beta)
     # init expert memory
-    expert_memory = load_expert_demo(env_name, data_dir, num_expert_episodes, n_step, gamma, centroids, expert_p_offset, alpha, beta)
+    combined_memory = load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combined_memory)
     
     # log total environment interactions
     total_env_steps = 0
@@ -226,21 +258,15 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         
         # store episode into replay memory
         print('\nAdding episode to memory...')
-        memory.add_episode(obs_list, action_list, np.array(rew_list), td_error_list)
+        combined_memory.add_episode(obs_list, action_list, np.array(rew_list), td_error_list, memory_id='agent')
         
         # perform k updates
         print(f'\nPerforming {training_steps_per_iteration} parameter updates...')
         total_loss = 0
         for _ in range(training_steps_per_iteration):
             # sample batch
-            if random.random() > 0.5:
-                batch, batch_idcs = expert_memory.sample(batch_size)
-                mem = 'expert'
-                weights = torch.from_numpy(expert_memory.weights[batch_idcs]).to(device)
-            else:
-                batch, batch_idcs = memory.sample(batch_size)
-                mem = 'agent'
-                weights = torch.from_numpy(memory.weights[batch_idcs]).to(device)
+            batch, batch_idcs = combined_memory.sample(batch_size)
+            weights = torch.from_numpy(combined_memory.weights[batch_idcs]).to(device)
             # make batch of Transition objects into Transition object of batches
             #time1 = time()
             batch = Transition(*zip(*batch))
@@ -289,11 +315,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             total_loss += loss.item()
 
             # update td errors
-            if mem == 'expert':
-                expert_memory.update_td_errors(batch_idcs, np.abs(one_step_td_errors.cpu().numpy()))
-            elif mem == 'agent':
-                memory.update_td_errors(batch_idcs, np.abs(one_step_td_errors.cpu().numpy()))
-
+            combined_memory.update_td_errors(batch_idcs, np.abs(one_step_td_errors.cpu().numpy()))
             
             # backward pass and update
             #time1 = time()
