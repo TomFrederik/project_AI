@@ -19,6 +19,48 @@ import PretrainDQN
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error'))
 
+class MemoryDataset(torch.utils.data.Dataset):
+    
+    def __init__(self, combined_memory):
+        '''
+        Wrapper class around combined memory to make it compatible with Dataset and be used by DataLoader
+        '''
+        self.combined_memory = combined_memory
+    
+    def __len__(self):
+        return len(self.combined_memory)
+    
+    def __getitem__(self, idx):
+        state, action, next_state, reward, n_step_state, n_step_reward, td_error = self.combined_memory[idx]
+        
+        pov = einops.rearrange(state['pov'], 'h w c -> c h w').astype(np.float32) / 255
+        next_pov = einops.rearrange(next_state['pov'], 'h w c -> c h w').astype(np.float32) / 255
+        n_step_pov = einops.rearrange(n_step_state['pov'], 'h w c -> c h w').astype(np.float32) / 255
+
+        vec = state['vec'].astype(np.float32)
+        next_vec = next_state['vec'].astype(np.float32)
+        n_step_vec = n_step_state['vec'].astype(np.float32)
+
+        reward = reward.astype(np.float32)
+        n_step_reward = n_step_reward.astype(np.float32)
+        
+        weight = self.weights[idx]
+
+        return (pov, vec), (next_pov, next_vec), (n_step_pov, n_step_vec), action, reward, n_step_reward, idx, weight
+    
+    def add_episode(self, obs, actions, rewards, td_errors, memory_id):
+        self.combined_memory.add_episode(obs, actions, rewards, td_errors, memory_id)
+    
+    @property
+    def weights(self):
+        return self.combined_memory.weights
+
+    def update_beta(self, new_beta):
+        self.combined_memory.update_beta(new_beta)
+    
+    def update_td_errors(self, batch_idcs, updated_td_errors):
+        self.combined_memory.update_td_errors(batch_idcs, updated_td_errors)
+        
 class CombinedMemory(object):
     def __init__(self, agent_memory_capacity, n_step, gamma, p_offset, alpha, beta):
         '''
@@ -44,12 +86,15 @@ class CombinedMemory(object):
         #time1 = time()
         self._update_weights()
         #print(f'Time to update weights = {time() - time1:.2f}s')
+   
+    def __getitem__(self, idx):
+        return np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])[idx]
 
     def sample(self, batch_size):
         idcs = np.random.choice(np.arange(len(self)), size=batch_size, replace=False, p=self.weights)
         #for key in self.memory_dict:
         #    print(key,': ',np.array(self.memory_dict[key].memory).shape)
-        return np.concatenate([np.array(self.memory_dict[key].memory) for key in self.memory_dict])[idcs], idcs
+        return np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])[idcs], idcs
 
     def update_beta(self, new_beta):
         for key in self.memory_dict:
@@ -196,6 +241,10 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     # init expert memory
     combined_memory = load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combined_memory)
     
+    
+    # init the dataset
+    dataset = MemoryDataset(combined_memory)
+    
     # log total environment interactions
     total_env_steps = 0
     num_episodes = 0
@@ -203,6 +252,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     # create env    
     env = gym.make(env_name)
 
+    time1 = time()
     while total_env_steps < max_env_steps:
         
         obs_list = []
@@ -269,48 +319,48 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
                 total_env_steps += 1
                 if steps >= max_episode_len or total_env_steps == max_env_steps:
                     break
-        print(f'\nEpisode {num_episodes}: Total reward = {total_reward}')
+        print(f'\nEpisode {num_episodes}: Total reward: {total_reward}, Duration: {int(time()-time1)}s')
         
         # store episode into replay memory
         print('\nAdding episode to memory...')
-        combined_memory.add_episode(obs_list, action_list, np.array(rew_list), td_error_list, memory_id='agent')
+        dataset.add_episode(obs_list, action_list, np.array(rew_list), td_error_list, memory_id='agent')
+        
+        # init/update sampler and loader
+        sampler = torch.utils.data.WeightedRandomSampler(replacement=True, num_samples=training_steps_per_iteration, weights=dataset.weights)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size, sampler=sampler)
         
         # perform k updates
         print(f'\nPerforming {training_steps_per_iteration} parameter updates...')
         total_loss = 0
+        updated_td_errors = {}
         
         # go to train mode
         q_net.train()
-        
-        for _ in tqdm(range(training_steps_per_iteration)):
-            # sample batch
-            batch, batch_idcs = combined_memory.sample(batch_size)
-            weights = torch.from_numpy(combined_memory.weights[batch_idcs]).to(device)
-            # make batch of Transition objects into Transition object of batches
-            #time1 = time()
-            batch = Transition(*zip(*batch))
-            #print(f'unpacking took {time()-time1}s')
-            #time1 = time()
+
+        for batch in tqdm(dataloader):
+            # unpack batch
+            state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights = batch
             
             # unpack pov and vec
-            pov, vec = extract_pov_vec(batch.state)
-            next_pov, next_vec = extract_pov_vec(batch.next_state)
-            n_step_pov, n_step_vec = extract_pov_vec(batch.n_step_state)
-            #print(f'extracting took {time()-time1}s')
+            pov, vec = state
+            next_pov, next_vec = next_state
+            n_step_pov, n_step_vec = n_step_state
 
             # prepare tensors
-            #time1 = time()
-            pov = torch.from_numpy(einops.rearrange(pov, 'b h w c -> b c h w').astype(np.float32)/255).to(q_net.device)
-            vec = torch.from_numpy(vec.astype(np.float32)).to(q_net.device)
-            next_pov = torch.from_numpy(einops.rearrange(next_pov, 'b h w c -> b c h w').astype(np.float32)/255).to(q_net.device)
-            next_vec = torch.from_numpy(next_vec.astype(np.float32)).to(q_net.device)
-            n_step_pov = torch.from_numpy(einops.rearrange(n_step_pov, 'b h w c -> b c h w').astype(np.float32)/255).to(q_net.device)
-            n_step_vec = torch.from_numpy(n_step_vec.astype(np.float32)).to(q_net.device)
-            reward = torch.from_numpy(np.array(batch.reward).astype(np.float32)).to(q_net.device)
-            n_step_reward = torch.from_numpy(np.array(batch.n_step_reward).astype(np.float32)).to(q_net.device)
-            #print(f'preparing input took {time()-time1}s')
+            time1 = time()
+            pov = pov.to(device)
+            vec = vec.to(device)
+            next_pov = next_pov.to(device)
+            next_vec = next_vec.to(device)
+            n_step_pov = n_step_pov.to(device)
+            n_step_vec = n_step_vec.to(device)
+            reward = reward.to(device)
+            n_step_reward = n_step_reward.to(device)
+            action = action.to(device)
+            weights = weights.to(device)
+            print(f'preparing input took {time()-time1}s')
             
-            # compute q values
+            # compute q values and choose actions
             #time1 = time()
             q_values = q_net(pov, vec)
             #print(f'inferencing q_values took {time()-time1}s')
@@ -331,57 +381,50 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             #time1 = time()
             idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
             #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
-            ac = batch.action
-            #ac = torch.ones(len(idcs), dtype=torch.long, requires_grad=False, device=device)
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
-            ac = torch.tensor(ac, dtype=torch.long, device=device)
-            #print(f'Putting ac into tensor took {time()-time1}s')
-            #time1 = time()
-            selected_q_values = torch.gather(q_values, 1, ac[:,None])
-            #print(f'Indexing q_values took {time()-time1}s')
-            #time1 = time()
+            time1 = time()
+            selected_q_values = torch.gather(q_values, 1, action[:,None])
+            print(f'Indexing q_values took {time()-time1}s')
+            time1 = time()
             selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
-            #print(f'indexing next_q_values took {time()-time1}s')
-            #time1 = time()
+            print(f'indexing next_q_values took {time()-time1}s')
+            time1 = time()
             selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
-            #print(f'Indexing n_step_q_values took {time()-time1}s')
-            #time1 = time()
+            print(f'Indexing n_step_q_values took {time()-time1}s')
+            time1 = time()
 
             one_step_td_errors = reward + gamma * selected_next_q_values - selected_q_values
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
+            print(f'Computing one_step_td_errors took {time()-time1}s')
+            time1 = time()
             one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
+            print(f'Computing one_step_loss took {time()-time1}s')
+            time1 = time()
             
             n_step_td_errors = reward + (gamma ** n_step) * selected_n_step_q_values - selected_q_values
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
+            print(f'Computing n_step_td_errors took {time()-time1}s')
+            time1 = time()
             n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
-            
+            print(f'Computing n_step_loss took {time()-time1}s')
+            time1 = time()
             loss = one_step_loss + n_step_loss
-            #print(f'Computing losses took {time()-time1}s')
+            print(f'Computing losses took {time()-time1}s')
             #time1 = time()
             total_loss += loss
             #print(f'Updating total loss took {time()-time1}s')
             
             
             # update td errors
-            #time1 = time()
+            time1 = time()
             # update towards n_step td error since that ought to be a more accurate estimate of the 'true' error
-            combined_memory.update_td_errors(batch_idcs, torch.abs(n_step_td_errors))
-            #print(f'Updating td errors took {time()-time1}s')
+            dataset.update_td_errors(batch_idcs, torch.abs(n_step_td_errors))
+            dataloader.sampler = torch.utils.data.WeightedRandomSampler(weights=dataset.weights, num_samples=training_steps_per_iteration, replacement=True)
+            print(f'Updating td errors took {time()-time1}s')
             
             # backward pass and update
-            #time1 = time()
+            time1 = time()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            #print(f'Backward+Step took {time()-time1}s')
+            print(f'Backward+Step took {time()-time1}s')
             
         print(f'\nMean loss = {total_loss.item() / training_steps_per_iteration}')
         cur_dur = time()-start
@@ -393,7 +436,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         torch.save(q_net.state_dict(), save_path)
         print('\nUpdating beta...')
         beta = min(beta + 0.01, 1)
-        combined_memory.update_beta(beta)
+        dataset.update_beta(beta)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
