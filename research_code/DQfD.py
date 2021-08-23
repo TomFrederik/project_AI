@@ -1,16 +1,20 @@
 import argparse
 import os
+import random
+from collections import deque, namedtuple
+from time import time
+
+import einops
+import gym
+import minerl
+import numpy as np
 import torch
 import torch.nn as nn
+from tqdm import tqdm
+
+from torch.utils.tensorboard import SummaryWriter
 
 import PretrainDQN
-import gym
-import numpy as np
-import einops
-from collections import deque, namedtuple
-import random
-from time import time
-import minerl
 
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error'))
@@ -32,43 +36,45 @@ class CombinedMemory(object):
         return len(self.memory_dict['expert']) + len(self.memory_dict['agent'])
     
     def add_episode(self, obs, actions, rewards, td_errors, memory_id):
-        time1 = time()
+        #time1 = time()
         self.memory_dict[memory_id].add_episode(obs, actions, rewards, td_errors)
-        print(f'Time to add episode = {time() - time1:.2f}s')
+        #print(f'Time to add episode = {time() - time1:.2f}s')
     
         # recompute weights
-        time1 = time()
+        #time1 = time()
         self._update_weights()
-        print(f'Time to update weights = {time() - time1:.2f}s')
+        #print(f'Time to update weights = {time() - time1:.2f}s')
 
     def sample(self, batch_size):
         idcs = np.random.choice(np.arange(len(self)), size=batch_size, replace=False, p=self.weights)
-        return np.array(np.concatenate([self.memory_dict[key].memory for key in self.memory_dict]))[idcs], idcs
+        #for key in self.memory_dict:
+        #    print(key,': ',np.array(self.memory_dict[key].memory).shape)
+        return np.concatenate([np.array(self.memory_dict[key].memory) for key in self.memory_dict])[idcs], idcs
 
     def update_beta(self, new_beta):
         for key in self.memory_dict:
             self.memory_dict[key].update_beta(new_beta)
     
     def _update_weights(self):
-        weights = np.array([(sars.td_error + self.memory_dict[key].p_offset) ** self.alpha for sars in self.memory_dict[key].memory for key in self.memory_dict])
-        print(weights.shape)
+        weights = np.array([(sars.td_error + self.memory_dict[key].p_offset) ** self.alpha for key in self.memory_dict for sars in self.memory_dict[key].memory])
+        #print(weights.shape)
         weights /= np.sum(weights)
         weights = 1 / (len(self) * weights) ** self.beta
         weights /= np.max(weights)
         self.weights = weights / np.sum(weights)
     
     def update_td_errors(self, idcs, td_errors):
-        time1 = time()
+        #time1 = time()
         for i, idx in enumerate(idcs):
             if idx < len(self.memory_dict['expert']):
                 self.memory_dict['expert'].memory[idx]._replace(td_error=td_errors[i])
             else:
                 self.memory_dict['agent'].memory[idx - len(self.memory_dict['expert'])]._replace(td_error=td_errors[i])
-        print(f'Time to update td_errors = {time() - time1:.2f}s')
+        #print(f'Time to update td_errors = {time() - time1:.2f}s')
         
-        time1 = time()        
+        #time1 = time()        
         self._update_weights()
-        print(f'Time to update weights = {time() - time1:.2f}s')
+        #print(f'Time to update weights = {time() - time1:.2f}s')
 
 
 class ReplayMemory(object):
@@ -147,7 +153,10 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
 
         # add episode to memory
         combined_memory.add_episode(obs, actions, rewards, td_errors, memory_id='expert')
-    print(f'\nLoaded {len(expert_memory)} expert samples!')
+        print(f'Reward: {np.sum(rewards)}\n')
+
+
+    print('\nLoaded ',len(combined_memory.memory_dict['expert']),' expert samples!')
 
     return combined_memory
 
@@ -160,7 +169,8 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, 'q_net.pt')
     print(f'\nSaving model to {save_path}!')
-
+    writer = SummaryWriter(log_dir=save_dir)
+    
     # set device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -213,47 +223,52 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         # prepare input
         obs_pov = torch.from_numpy(einops.rearrange(obs['pov'], 'h w c -> 1 c h w').astype(np.float32) / 255).to(q_net.device)
         obs_vec = torch.from_numpy(einops.rearrange(obs['vector'], 'd -> 1 d').astype(np.float32)).to(q_net.device)
-        # compute q values
-        q_values = q_net(obs_pov, obs_vec).squeeze()
-            
-        while not done:    
-            
-            # select new action
-            if steps % action_repeat == 0:
-                if np.random.rand(1)[0] < epsilon:
-                    action_ind = np.random.randint(centroids.shape[0])
-                else:
-                    action_ind = torch.argmax(q_values, dim=0).cpu().item()
-                    highest_q = q_values[action_ind].cpu().item()
 
-                # remap action to centroid
-                action = {'vector': centroids[action_ind]}
-
-            # env step
-            obs, rew, done, _ = env.step(action)
-            
-            # prepare input
-            obs_pov = torch.from_numpy(einops.rearrange(obs['pov'], 'h w c -> 1 c h w').astype(np.float32) / 255).to(q_net.device)
-            obs_vec = torch.from_numpy(einops.rearrange(obs['vector'], 'd -> 1 d').astype(np.float32)).to(q_net.device)
-        
-            # store transition
-            obs_list.append(obs)
-            rew_list.append(rew)
-            action_list.append(action_ind)
-            
+        # go to eval mode
+        q_net.eval()
+        with torch.no_grad():
             # compute q values
             q_values = q_net(obs_pov, obs_vec).squeeze()
+                
+            while not done:    
+                
+                # select new action
+                if steps % action_repeat == 0:
+                    if np.random.rand(1)[0] < epsilon:
+                        action_ind = np.random.randint(centroids.shape[0])
+                        highest_q = q_values[action_ind].cpu().item()
+                    else:
+                        action_ind = torch.argmax(q_values, dim=0).cpu().item()
+                        highest_q = q_values[action_ind].cpu().item()
 
-            # record td_error
-            td_error_list.append(np.abs(rew + gamma * target_net(obs_pov, obs_vec).squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
-                    
-            # bookkeeping
-            total_reward += rew
-            steps += 1
-            #print(steps)
-            total_env_steps += 1
-            if steps >= max_episode_len or total_env_steps == max_env_steps:
-                break
+                    # remap action to centroid
+                    action = {'vector': centroids[action_ind]}
+
+                # env step
+                obs, rew, done, _ = env.step(action)
+                
+                # prepare input
+                obs_pov = torch.from_numpy(einops.rearrange(obs['pov'], 'h w c -> 1 c h w').astype(np.float32) / 255).to(q_net.device)
+                obs_vec = torch.from_numpy(einops.rearrange(obs['vector'], 'd -> 1 d').astype(np.float32)).to(q_net.device)
+            
+                # store transition
+                obs_list.append(obs)
+                rew_list.append(rew)
+                action_list.append(action_ind)
+                
+                # compute q values
+                q_values = q_net(obs_pov, obs_vec).squeeze()
+
+                # record td_error
+                td_error_list.append(np.abs(rew + gamma * target_net(obs_pov, obs_vec).squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
+                        
+                # bookkeeping
+                total_reward += rew
+                steps += 1
+                #print(steps)
+                total_env_steps += 1
+                if steps >= max_episode_len or total_env_steps == max_env_steps:
+                    break
         print(f'\nEpisode {num_episodes}: Total reward = {total_reward}')
         
         # store episode into replay memory
@@ -263,7 +278,11 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         # perform k updates
         print(f'\nPerforming {training_steps_per_iteration} parameter updates...')
         total_loss = 0
-        for _ in range(training_steps_per_iteration):
+        
+        # go to train mode
+        q_net.train()
+        
+        for _ in tqdm(range(training_steps_per_iteration)):
             # sample batch
             batch, batch_idcs = combined_memory.sample(batch_size)
             weights = torch.from_numpy(combined_memory.weights[batch_idcs]).to(device)
@@ -294,28 +313,68 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             # compute q values
             #time1 = time()
             q_values = q_net(pov, vec)
+            #print(f'inferencing q_values took {time()-time1}s')
+            #time1 = time()
             next_q_values = target_net(next_pov, next_vec).detach()
-            base_next_action = torch.argmax(q_net(next_pov, next_vec).detach(), dim=1)
+            #print(f'inferencing next_q_values took {time()-time1}s')
+            #time1 = time()
+            base_next_action = torch.argmax(next_q_values, dim=1)
+            #print(f'inferencing base_next_action took {time()-time1}s')
+            #time1 = time()
             n_step_q_values = target_net(n_step_pov, n_step_vec).detach()
-            base_n_step_action = torch.argmax(q_net(n_step_pov, n_step_vec).detach(), dim=1)
-            #print(f'inference took {time()-time1}s')
+            #print(f'inferencing n_step_q_values took {time()-time1}s')
+            #time1 = time()
+            base_n_step_action = torch.argmax(n_step_q_values, dim=1)
+            #print(f'inferencing base_n_step_action took {time()-time1}s')
             
             # compute losses
-            idcs = torch.arange(0, len(q_values), dtype=torch.long)
+            #time1 = time()
+            idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
+            ac = batch.action
+            #ac = torch.ones(len(idcs), dtype=torch.long, requires_grad=False, device=device)
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
+            ac = torch.tensor(ac, dtype=torch.long, device=device)
+            #print(f'Putting ac into tensor took {time()-time1}s')
+            #time1 = time()
+            selected_q_values = torch.gather(q_values, 1, ac[:,None])
+            #print(f'Indexing q_values took {time()-time1}s')
+            #time1 = time()
+            selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
+            #print(f'indexing next_q_values took {time()-time1}s')
+            #time1 = time()
+            selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
+            #print(f'Indexing n_step_q_values took {time()-time1}s')
+            #time1 = time()
+
+            one_step_td_errors = reward + gamma * selected_next_q_values - selected_q_values
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
+            one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
             
-            one_step_loss = loss_fn(q_values[idcs, batch.action], reward + gamma * next_q_values[idcs, base_next_action])
-            one_step_td_errors = reward + gamma * next_q_values[idcs, base_next_action].detach() - q_values[idcs, batch.action].detach()
-            one_step_loss = (one_step_loss * weights).mean() # importance sampling scaling
-
-            n_step_loss = loss_fn(q_values[idcs, batch.action], n_step_reward + (gamma ** n_step) * n_step_q_values[idcs, base_n_step_action])
-            n_step_td_errors = reward + (gamma ** n_step) * n_step_q_values[idcs, base_n_step_action].detach() - q_values[idcs, batch.action].detach()
-            n_step_loss = (n_step_loss * weights).mean() # importance sampling scaling
-
+            n_step_td_errors = reward + (gamma ** n_step) * selected_n_step_q_values - selected_q_values
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
+            n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
+            
             loss = one_step_loss + n_step_loss
-            total_loss += loss.item()
-
+            #print(f'Computing losses took {time()-time1}s')
+            #time1 = time()
+            total_loss += loss
+            #print(f'Updating total loss took {time()-time1}s')
+            
+            
             # update td errors
-            combined_memory.update_td_errors(batch_idcs, np.abs(one_step_td_errors.cpu().numpy()))
+            #time1 = time()
+            # update towards n_step td error since that ought to be a more accurate estimate of the 'true' error
+            combined_memory.update_td_errors(batch_idcs, torch.abs(n_step_td_errors))
+            #print(f'Updating td errors took {time()-time1}s')
             
             # backward pass and update
             #time1 = time()
@@ -324,7 +383,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             optimizer.step()
             #print(f'Backward+Step took {time()-time1}s')
             
-        print(f'\nMean loss = {total_loss / training_steps_per_iteration}')
+        print(f'\nMean loss = {total_loss.item() / training_steps_per_iteration}')
         cur_dur = time()-start
         print(f'Time elapsed so far: {cur_dur // 60}m {cur_dur % 60:.1f}s')
         print(f'Time per iteration: {cur_dur / num_episodes:.1f}s')
@@ -334,8 +393,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         torch.save(q_net.state_dict(), save_path)
         print('\nUpdating beta...')
         beta = min(beta + 0.01, 1)
-        memory.update_beta(beta)
-        expert_memory.update_beta(beta)
+        combined_memory.update_beta(beta)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
