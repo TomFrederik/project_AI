@@ -13,6 +13,8 @@ from copy import deepcopy
 import vqvae
 import datasets
 
+torch.backends.cudnn.benchmark = True
+
 class PretrainQNetwork(pl.LightningModule):
     
     def __init__(self, vqvae_path, n_actions, optim_kwargs, scheduler_kwargs, target_update_rate, margin, gamma, n):
@@ -192,20 +194,10 @@ def main(env_name, batch_size, lr, weight_decay, load_from_checkpoint, version, 
         
     
     # load data
-    data = datasets.PretrainQNetData(env_name, data_dir, centroids, n, gamma, num_data)
-    lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
-    train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=6, pin_memory=True)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=6, pin_memory=True)
-
-    num_batches = len(train_data) // batch_size
-    if len(train_data) % batch_size != 0:
-        num_batches += 1
-
-    print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
-    print(f'num val samples = {len(val_data)}')
-
-    model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor='Validation/Loss', save_last=True)
+    train_data = datasets.PretrainQNetIterableData(env_name, data_dir, centroids, n, gamma)
+    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=6, pin_memory=True)
+    
+    model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor='Training/Loss', save_last=True)
     trainer=pl.Trainer(
                     precision=32, #32 is normal, 16 is mixed precision
                     progress_bar_refresh_rate=1, #every N batches update progress bar
@@ -214,10 +206,9 @@ def main(env_name, batch_size, lr, weight_decay, load_from_checkpoint, version, 
                     gpus=torch.cuda.device_count(),
                     accelerator='dp', #anything else here seems to lead to crashes/errors
                     default_root_dir=log_dir,
-                    val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
                     max_epochs=epochs
                 )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader)
 
 
 if __name__ == '__main__':
@@ -239,8 +230,6 @@ if __name__ == '__main__':
     parser.add_argument('--lr_gamma', default=1, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
-    parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--target_update_rate', default=100, type=int, help='How often to update target network')
     parser.add_argument('--centroids_path', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
     

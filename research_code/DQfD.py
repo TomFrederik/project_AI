@@ -19,6 +19,8 @@ import PretrainDQN
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error'))
 
+torch.backends.cudnn.benchmark = True
+
 class MemoryDataset(torch.utils.data.Dataset):
     
     def __init__(self, combined_memory):
@@ -378,56 +380,55 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             #print(f'preparing input took {time()-time1}s')
             
             # compute q values and choose actions
-            time1 = time()
+            #time1 = time()
             q_values = q_net(pov, vec)
             #print(f'inferencing q_values took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             next_q_values = target_net(next_pov, next_vec).detach()
             #print(f'inferencing next_q_values took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             base_next_action = torch.argmax(next_q_values, dim=1)
             #print(f'inferencing base_next_action took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             n_step_q_values = target_net(n_step_pov, n_step_vec).detach()
             #print(f'inferencing n_step_q_values took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             base_n_step_action = torch.argmax(n_step_q_values, dim=1)
             #print(f'inferencing base_n_step_action took {time()-time1}s')
             
             # compute losses
-            time1 = time()
+            #time1 = time()
             idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
             #print(f'Computing losses took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             selected_q_values = torch.gather(q_values, 1, action[:,None])
             #print(f'Indexing q_values took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
             #print(f'indexing next_q_values took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
             #print(f'Indexing n_step_q_values took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
 
             one_step_td_errors = reward + gamma * selected_next_q_values - selected_q_values
             #print(f'Computing one_step_td_errors took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
             #print(f'Computing one_step_loss took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             
             n_step_td_errors = reward + (gamma ** n_step) * selected_n_step_q_values - selected_q_values
             #print(f'Computing n_step_td_errors took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling
             #print(f'Computing n_step_loss took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             loss = one_step_loss + n_step_loss
             #print(f'Computing losses took {time()-time1}s')
-            time1 = time()
+            #time1 = time()
             total_loss += loss
             #print(f'Updating total loss took {time()-time1}s')
-            
             
             # update td errors
             #time1 = time()

@@ -26,6 +26,7 @@ from vqvae_model.quantize import VQVAEQuantize, GumbelQuantize
 from vqvae_model.loss import Normal, LogitLaplace
 
 import datasets
+torch.backends.cudnn.benchmark = True
 
 # -----------------------------------------------------------------------------
 class VQVAE_new(pl.LightningModule):

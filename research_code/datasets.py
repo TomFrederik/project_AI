@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset
 import torchvision as tv
 import minerl
 import random
@@ -7,6 +7,7 @@ import numpy as np
 import os
 import random
 import einops
+from itertools import chain
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
         'MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0']
@@ -140,7 +141,6 @@ class RewardData(Dataset):
 
         return pov, self.vec_obs[idx].astype(np.float32), self.rewards[idx].astype(np.float32)
 
-
 class VAEData(Dataset):
 
     def __init__(self, env_name, data_dir, num_data=0):
@@ -173,7 +173,6 @@ class VAEData(Dataset):
         pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
 
         return self.actions[idx].astype(np.float32), pov, self.vec_obs[idx], self.rewards[idx]
-
 
 class DynamicsData(Dataset):
 
@@ -247,7 +246,6 @@ class DynamicsData(Dataset):
 
         return pov, vec_obs, act, rew
 
-
 class VectorObsData(Dataset):
 
     def __init__(self, env_name, data_dir, num_data=0):
@@ -319,6 +317,49 @@ class VectorObsData(Dataset):
 
         return pov, vec_obs, act, target
 
+class PretrainQNetIterableData(IterableDataset):
+    def __init__(self, env_name, data_dir, centroids, n_step, gamma):
+        super().__init__()
+        
+        self.n_step = n_step
+        self.gamma = gamma
+        self.centroids = centroids
+        self.pipeline = minerl.data.make(env_name, data_dir)
+        self.names = self.pipeline.get_trajectory_names()
+        self.names.shuffle()
+        
+        # compute discount array
+        self.discount_array = np.array([self.gamma ** i for i in range(self.n_step)])
+        
+    def _load_trajectory(self, name):
+        # load trajectory data
+        data = self.pipeline.load_data(name)
+        
+        # unpack data
+        obs, actions, rewards, *_ = zip(*data)
+        pov_obs, vec_obs = [item['pov'] for item in obs], [item['vector'] for item in obs]
+        pov_obs = np.array(pov_obs).astype(np.float32) / 255
+        vec_obs = np.array(vec_obs).astype(np.float32)
+        rewards = np.array(rewards).astype(np.float32)
+        
+        # compute actions
+        actions = np.argmin(((self.centroids[None,:,:] - actions[:-self.n_step,None,:]) ** 2).sum(axis=-1), axis=1).astype(np.float32)
+        
+        return pov_obs, vec_obs, actions, rewards
+
+    def _get_trajectory_iterator(self, name):
+        pov_obs, vec_obs, actions, rewards = self._load_trajectory(name)
+        idcs = np.random.permutation(len(actions))
+        for idx in idcs:
+            yield pov_obs[idx], vec_obs[idx], actions[idx], rewards[idx], pov_obs[idx+1], vec_obs[idx+1], np.sum(rewards[idx:idx+self.n_step]*self.discount_array), pov_obs[idx+self.n_step], vec_obs[idx+self.n_step]
+    
+    def _get_stream_of_trajectories(self, names):
+        return chain.from_iterable(map(self._get_trajectory_iterator, names))
+        
+    def __iter__(self):
+        return self._get_stream_of_trajectories(self.names)
+        
+        
 class PretrainQNetData(Dataset):
 
     def __init__(self, env_name, data_dir, centroids, n, gamma, num_data=0):
