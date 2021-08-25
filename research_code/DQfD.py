@@ -315,7 +315,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
                 #print(f'Preparing input took {time()-time1}s')
                 
                 # compute q values
-                time1 = time()
+                #time1 = time()
                 q_values = q_net(obs_pov, obs_vec).squeeze()
                 #print(f'Computing q_values took {time()-time1}s')
 
@@ -331,15 +331,18 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
                 total_env_steps += 1
                 if steps >= max_episode_len or total_env_steps == max_env_steps:
                     break
+            
         print(f'\nEpisode {num_episodes}: Total reward: {total_reward}, Duration: {time()-time0}s')
         
         # store episode into replay memory
         print('\nAdding episode to memory...')
         dataset.add_episode(obs_list, action_list, np.array(rew_list), td_error_list, memory_id='agent')
-        
+        #print(dataset[0])
+        #print(len(dataset))
+    
         # init/update sampler and loader
-        sampler = torch.utils.data.WeightedRandomSampler(replacement=True, num_samples=training_steps_per_iteration, weights=dataset.weights)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size, sampler=sampler)
+        sampler = torch.utils.data.WeightedRandomSampler(replacement=True, num_samples=training_steps_per_iteration * batch_size, weights=dataset.weights)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size, sampler=sampler, num_workers=6)
         
         # perform k updates
         print(f'\nPerforming {training_steps_per_iteration} parameter updates...')
@@ -349,7 +352,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         # go to train mode
         q_net.train()
 
-        for batch in tqdm(dataloader):
+        for batch in tqdm(iter(dataloader)):
             # unpack batch
             #time1 = time()
             state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights = batch
@@ -454,7 +457,8 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         dataloader = torch.utils.data.DataLoader(
             dataset, 
             batch_size, 
-            sampler=torch.utils.data.WeightedRandomSampler(weights=dataset.weights, num_samples=training_steps_per_iteration, replacement=True)
+            sampler=torch.utils.data.WeightedRandomSampler(weights=dataset.weights, num_samples=len(dataset), replacement=True),
+            num_workers=6
         )
 
 if __name__ == '__main__':
