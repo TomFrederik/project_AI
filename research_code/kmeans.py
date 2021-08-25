@@ -12,15 +12,15 @@ def compute_kmeans(env_name, data_dir='./numpy_data', n_clusters=200, save_dir='
 
     # Run k-means clustering using scikit-learn.
     print(f"Running KMeans on the action vectors with {n_clusters} clusters")
-    kmeans = KMeans(n_clusters=n_clusters)
+    kmeans = KMeans(n_clusters=n_clusters, verbose=1)
     kmeans.fit(actions)
     action_centroids = kmeans.cluster_centers_
 
     # make sure that save dir exists
     print(f"KMeans done! Saving to {save_dir}/{env_name}_..")
     os.makedirs(save_dir, exist_ok=True)
-    np.save(save_dir + '/' + env_name + '_centroids.npy', action_centroids)
-    np.save(save_dir + '/' + env_name + '_kmeans.npy', kmeans)
+    np.save(save_dir + '/' + env_name + '_' + str(n_clusters) + '_centroids.npy', action_centroids)
+    np.save(save_dir + '/' + env_name + '_' + str(n_clusters) + '_kmeans.npy', kmeans)
     return action_centroids, actions, kmeans
 
 

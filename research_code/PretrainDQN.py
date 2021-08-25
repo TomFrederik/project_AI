@@ -70,7 +70,7 @@ class PretrainQNetwork(pl.LightningModule):
             # apply conv feature ext
             out = einops.rearrange(self.target_net['conv_net'](out), 'b c h w -> b (c h w)')
             # apply q network
-            out = self.target_net['q_net'](torch.cat([out, vec_obs], dim=1)) + 1
+            out = self.target_net['q_net'](torch.cat([out, vec_obs], dim=1))# + 1
             return out
         else:
             # encode into vqvae latent
@@ -78,7 +78,7 @@ class PretrainQNetwork(pl.LightningModule):
             # apply conv feature ext
             out = einops.rearrange(self.conv_net(out), 'b c h w -> b (c h w)')
             # apply q network
-            out = self.q_net(torch.cat([out, vec_obs], dim=1)) + 1
+            out = self.q_net(torch.cat([out, vec_obs], dim=1))# + 1
             return out, codebook_loss
     
     def _large_margin_classification_loss(self, q_values, expert_action):

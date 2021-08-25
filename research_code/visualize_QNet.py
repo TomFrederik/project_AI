@@ -8,10 +8,11 @@ import einops
 import streamlit as st
 import matplotlib.pyplot as plt
 
-def load_traj(env_name, data_dir, model_version, centroids_path, log_dir):
+def load_traj(env_name, data_dir, model_version, centroids_path, log_dir, init_model, num_centroids):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     pipeline = minerl.data.make(env_name, data_dir)
+    #pipeline = minerl.data.make('MineRLObtainIronPickaxeVectorObf-v0', data_dir)
     traj_name = pipeline.get_trajectory_names()[0]
     if 'traj_name' not in st.session_state:
         st.session_state.traj_name = traj_name
@@ -19,7 +20,8 @@ def load_traj(env_name, data_dir, model_version, centroids_path, log_dir):
     traj_data = pipeline.load_data(traj_name)
 
     # load centroids
-    centroids_path = os.path.join(centroids_path, env_name + '_centroids.npy')
+    centroids_path = os.path.join(centroids_path, env_name + '_' + str(num_centroids) + '_centroids.npy')
+    #centroids_path = os.path.join(centroids_path, 'MineRLObtainIronPickaxeVectorObf-v0' + '_centroids.npy')
     print(f'\nLoading centroids from {centroids_path}...')
     centroids = np.load(centroids_path)
 
@@ -35,7 +37,12 @@ def load_traj(env_name, data_dir, model_version, centroids_path, log_dir):
     actions = torch.from_numpy(np.argmin(((centroids[None,:,:] - actions[:,None,:]) ** 2).sum(axis=-1), axis=1).astype(np.int64)).to(device)
 
     # load Q model
-    model = PretrainQNetwork.load_from_checkpoint(os.path.join(log_dir, env_name, 'lightning_logs', 'version_'+str(model_version), 'checkpoints', 'last.ckpt')).to(device)
+    model = PretrainQNetwork.load_from_checkpoint(os.path.join(log_dir, env_name, 'lightning_logs', 'version_'+str(model_version), 'checkpoints', 'last.ckpt'))
+    if init_model:
+        hparams = model.hparams
+        model = PretrainQNetwork(**hparams).to(device)
+    else:
+        model = model.to(device)
     model.eval()
     
     # compute q_values
@@ -56,6 +63,7 @@ def load_traj(env_name, data_dir, model_version, centroids_path, log_dir):
     # make them numpy again
     pov_obs = (einops.rearrange(pov_obs.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
     vec_ovs = vec_obs.cpu().numpy()
+    actions = actions.cpu().numpy()
 
     return pov_obs, actions, q_values, true_returns
 
@@ -64,12 +72,14 @@ def main(
         model_version,
         data_dir,
         log_dir,
-        centroids_path
+        centroids_path,
+        init_model,
+        num_centroids
     ):
 
 
     if 'loaded' not in st.session_state:
-        st.session_state.pov_obs, st.session_state.actions, st.session_state.q_values, st.session_state.true_returns = load_traj(env_name, data_dir, model_version, centroids_path, log_dir)
+        st.session_state.pov_obs, st.session_state.actions, st.session_state.q_values, st.session_state.true_returns = load_traj(env_name, data_dir, model_version, centroids_path, log_dir, init_model, num_centroids)
         st.session_state.loaded = True
     
     if st.session_state.loaded:
@@ -91,7 +101,7 @@ def main(
             st.image(pov_obs[st.session_state.frame], width=400, use_column_width=False)
     
         with col1:
-            human_action = st.session_state.actions[st.session_state.frame].item()
+            human_action = st.session_state.actions[st.session_state.frame]
             human_q = st.session_state.q_values[st.session_state.frame, human_action]
             model_action = np.argmax(st.session_state.q_values[st.session_state.frame])
             model_q = st.session_state.q_values[st.session_state.frame, model_action]
@@ -113,6 +123,11 @@ def main(
             
             st.text(f'True return: {st.session_state.true_returns[st.session_state.frame]:.2f}')
 
+            fig = plt.figure()
+            unique, count = np.unique(st.session_state.actions, return_counts=True)
+            plt.bar(unique, np.log(count)+1)
+            st.pyplot(fig)
+
 
     else:
         raise NotImplementedError('Something went wrong!')
@@ -128,6 +143,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', type=str, default='MineRLTreechopVectorObf-v0')
     parser.add_argument('--model_version', type=int, default=0)
+    parser.add_argument('--num_centroids', type=int, default=100)
+    parser.add_argument('--init_model', action='store_true')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs/PretrainQNetwork')
     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--centroids_path', default='/home/lieberummaas/datadisk/minerl/data')
