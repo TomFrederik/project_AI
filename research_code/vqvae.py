@@ -220,7 +220,12 @@ class VQVAE(pl.LightningModule):
         z = self.encoder(self.recon_loss.inmap(x))
         z_q, _, ind, log_priors = self.quantizer(z)
         return z_q, ind, log_priors
-
+    
+    def encode_with_grad(self, x):
+        z = self.encoder(self.recon_loss.inmap(x))
+        z_q, diff, ind, log_priors = self.quantizer(z)
+        return z_q, diff, ind, log_priors
+    
     def training_step(self, batch, batch_idx):
         img = batch[1]
         img = self.recon_loss.inmap(img)

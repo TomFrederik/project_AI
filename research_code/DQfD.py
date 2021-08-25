@@ -103,12 +103,11 @@ class CombinedMemory(object):
             self.memory_dict[key].update_beta(new_beta)
     
     def _update_weights(self):
-        weights = np.array([(sars.td_error + self.memory_dict[key].p_offset) ** self.alpha for key in self.memory_dict for sars in self.memory_dict[key].memory])
+        weights = np.array([(sars.td_error + self.memory_dict[key].p_offset) ** self.alpha for key in ['expert', 'agent'] for sars in self.memory_dict[key].memory])
         #print(weights.shape)
-        weights /= np.sum(weights)
+        weights /= np.sum(weights) # = P(i)
         weights = 1 / (len(self) * weights) ** self.beta
-        weights /= np.max(weights)
-        self.weights = weights / np.sum(weights)
+        self.weights = weights / np.max(weights)
     
     def update_td_errors(self, idcs, td_errors):
         #time1 = time()
@@ -226,8 +225,6 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
     # set up model
     q_net = PretrainDQN.PretrainQNetwork.load_from_checkpoint(model_path).to(device)
-    target_net = PretrainDQN.PretrainQNetwork.load_from_checkpoint(model_path).to(device)
-    target_net.eval()
     
     # set up optimization
     optimizer = torch.optim.AdamW(q_net.parameters(), lr=lr)
@@ -323,7 +320,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
                 # record td_error
                 #time1 = time()
-                td_error_list.append(np.abs(rew + gamma * target_net(obs_pov, obs_vec).squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
+                td_error_list.append(np.abs(rew + gamma * q_net(obs_pov, obs_vec, target=True).squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
                 #print(f'Computing td_error took {time()-time1}s')
                         
                 # bookkeeping
@@ -384,13 +381,13 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             q_values = q_net(pov, vec)
             #print(f'inferencing q_values took {time()-time1}s')
             #time1 = time()
-            next_q_values = target_net(next_pov, next_vec).detach()
+            next_q_values = q_net(next_pov, next_vec, target=True).detach()
             #print(f'inferencing next_q_values took {time()-time1}s')
             #time1 = time()
             base_next_action = torch.argmax(next_q_values, dim=1)
             #print(f'inferencing base_next_action took {time()-time1}s')
             #time1 = time()
-            n_step_q_values = target_net(n_step_pov, n_step_vec).detach()
+            n_step_q_values = q_net(n_step_pov, n_step_vec, target=True).detach()
             #print(f'inferencing n_step_q_values took {time()-time1}s')
             #time1 = time()
             base_n_step_action = torch.argmax(n_step_q_values, dim=1)
@@ -448,7 +445,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         print(f'Time elapsed so far: {cur_dur // 60}m {cur_dur % 60:.1f}s')
         print(f'Time per iteration: {cur_dur / num_episodes:.1f}s')
         print('\nUpdating target...')
-        target_net.load_state_dict(q_net.state_dict())
+        q_net._update_target()
         print('\nSaving model')
         torch.save(q_net.state_dict(), save_path)
         print('\nUpdating beta...')

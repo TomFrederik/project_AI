@@ -318,15 +318,22 @@ class VectorObsData(Dataset):
         return pov, vec_obs, act, target
 
 class PretrainQNetIterableData(IterableDataset):
-    def __init__(self, env_name, data_dir, centroids, n_step, gamma):
+    def __init__(self, env_name, data_dir, centroids, n_step, gamma, num_workers):
         super().__init__()
         
         self.n_step = n_step
         self.gamma = gamma
         self.centroids = centroids
+        self.num_workers = num_workers
         self.pipeline = minerl.data.make(env_name, data_dir)
         self.names = self.pipeline.get_trajectory_names()
-        self.names.shuffle()
+        random.shuffle(self.names)
+
+        if self.num_workers > 0:
+            trajectories_per_worker = len(self.names) // self.num_workers
+            self.names_per_worker = {
+                worker_id: self.names[trajectories_per_worker * worker_id:trajectories_per_worker*(worker_id+1)] for worker_id in range(self.num_workers)
+            }
         
         # compute discount array
         self.discount_array = np.array([self.gamma ** i for i in range(self.n_step)])
@@ -338,12 +345,13 @@ class PretrainQNetIterableData(IterableDataset):
         # unpack data
         obs, actions, rewards, *_ = zip(*data)
         pov_obs, vec_obs = [item['pov'] for item in obs], [item['vector'] for item in obs]
-        pov_obs = np.array(pov_obs).astype(np.float32) / 255
+        pov_obs = einops.rearrange(np.array(pov_obs), 'b h w c -> b c h w').astype(np.float32) / 255
         vec_obs = np.array(vec_obs).astype(np.float32)
         rewards = np.array(rewards).astype(np.float32)
-        
+        actions = np.array([ac['vector'] for ac in actions]).astype(np.float32)
+
         # compute actions
-        actions = np.argmin(((self.centroids[None,:,:] - actions[:-self.n_step,None,:]) ** 2).sum(axis=-1), axis=1).astype(np.float32)
+        actions = np.argmin(((self.centroids[None,:,:] - actions[:-self.n_step,None,:]) ** 2).sum(axis=-1), axis=1).astype(np.int64)
         
         return pov_obs, vec_obs, actions, rewards
 
@@ -351,13 +359,17 @@ class PretrainQNetIterableData(IterableDataset):
         pov_obs, vec_obs, actions, rewards = self._load_trajectory(name)
         idcs = np.random.permutation(len(actions))
         for idx in idcs:
-            yield pov_obs[idx], vec_obs[idx], actions[idx], rewards[idx], pov_obs[idx+1], vec_obs[idx+1], np.sum(rewards[idx:idx+self.n_step]*self.discount_array), pov_obs[idx+self.n_step], vec_obs[idx+self.n_step]
+            yield pov_obs[idx], vec_obs[idx], actions[idx], rewards[idx], pov_obs[idx+1], vec_obs[idx+1], np.sum(rewards[idx:idx+self.n_step]*self.discount_array).astype(np.float32), pov_obs[idx+self.n_step], vec_obs[idx+self.n_step]
     
     def _get_stream_of_trajectories(self, names):
         return chain.from_iterable(map(self._get_trajectory_iterator, names))
         
     def __iter__(self):
-        return self._get_stream_of_trajectories(self.names)
+        if self.num_workers == 0:
+            return self._get_stream_of_trajectories(self.names)
+        else:
+            worker_id = torch.utils.data.get_worker_info().id
+            return self._get_stream_of_trajectories(self.names_per_worker[worker_id])
         
         
 class PretrainQNetData(Dataset):

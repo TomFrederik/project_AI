@@ -13,7 +13,7 @@ from copy import deepcopy
 import vqvae
 import datasets
 
-torch.backends.cudnn.benchmark = True
+#torch.backends.cudnn.benchmark = True
 
 class PretrainQNetwork(pl.LightningModule):
     
@@ -57,24 +57,29 @@ class PretrainQNetwork(pl.LightningModule):
     
     def _update_target(self):
         self.target_net = nn.ModuleDict({
+            'vae':deepcopy(self.VAE),
             'conv_net':deepcopy(self.conv_net),
             'q_net':deepcopy(self.q_net)
         })
+        self.target_net.eval()
         
     def forward(self, pov, vec_obs, target=False):
-        # encode into vqvae latent
-        out, _, _ = self.VAE.encode_only(pov)
         if target:
+            # encode into vqvae latent
+            out, _, _ = self.target_net['vae'].encode_only(pov)
             # apply conv feature ext
             out = einops.rearrange(self.target_net['conv_net'](out), 'b c h w -> b (c h w)')
             # apply q network
             out = self.target_net['q_net'](torch.cat([out, vec_obs], dim=1)) + 1
+            return out
         else:
+            # encode into vqvae latent
+            out, codebook_loss, _, _ = self.VAE.encode_with_grad(pov)
             # apply conv feature ext
             out = einops.rearrange(self.conv_net(out), 'b c h w -> b (c h w)')
             # apply q network
             out = self.q_net(torch.cat([out, vec_obs], dim=1)) + 1
-        return out
+            return out, codebook_loss
     
     def _large_margin_classification_loss(self, q_values, expert_action):
         '''
@@ -89,20 +94,21 @@ class PretrainQNetwork(pl.LightningModule):
         pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs = batch
         
         # predict q values
-        q_values = self(pov, vec_obs)
+        q_values, codebook_loss = self(pov, vec_obs)
+        action = action.detach()
         target_next_q_values = self(next_pov, next_vec_obs, target=True).detach()
-        base_next_action = torch.argmax(self(next_pov, next_vec_obs).detach(), dim=1)
+        base_next_action = torch.argmax(self(next_pov, next_vec_obs)[0].detach(), dim=1)
         target_n_step_q_values = self(n_step_pov, n_step_vec_obs, target=True).detach()
-        base_n_step_action = torch.argmax(self(n_step_pov, n_step_vec_obs).detach(), dim=1)
+        base_n_step_action = torch.argmax(self(n_step_pov, n_step_vec_obs)[0].detach(), dim=1)
         
         # compute the individual losses
-        idcs = torch.arange(0, len(q_values), dtype=torch.long)
+        idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
         classification_loss = self._large_margin_classification_loss(q_values, action)
         one_step_loss = self.loss_fn(q_values[idcs, action], reward + self.hparams.gamma * target_next_q_values[idcs, base_next_action])
         n_step_loss = self.loss_fn(q_values[idcs, action], n_step_reward + (self.hparams.gamma ** self.hparams.n) * target_n_step_q_values[idcs, base_n_step_action])
-        
+
         # sum up losses
-        loss = classification_loss + one_step_loss + n_step_loss
+        loss = classification_loss + one_step_loss + n_step_loss + codebook_loss
         
         # logging
         self.log('Training/1-step TD Error', one_step_loss, on_step=True)
@@ -139,12 +145,12 @@ class PretrainQNetwork(pl.LightningModule):
     
     def on_after_backward(self):
         if (self.global_step + 1) % self.hparams.target_update_rate == 0:
-            print(f'Global step {self.global_step+1}: Updating Target Network')
+            print(f'\nGlobal step {self.global_step+1}: Updating Target Network\n')
             self._update_target()
         
     def configure_optimizers(self):
         # set up optimizer
-        params = list(self.q_net.parameters()) + list(self.conv_net.parameters())
+        params = list(self.VAE.parameters()) + list(self.q_net.parameters()) + list(self.conv_net.parameters())
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
         # set up scheduler
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])
@@ -156,9 +162,12 @@ class PretrainQNetwork(pl.LightningModule):
         return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
 
 
-def main(env_name, batch_size, lr, weight_decay, load_from_checkpoint, version, vqvae_path, data_dir, log_dir,
-        num_data, epochs, lr_gamma, lr_step_mode, lr_decrease_freq, val_perc, val_check_interval,
-        centroids_path, target_update_rate, margin, gamma, n):
+def main(
+    env_name, batch_size, num_workers, lr, weight_decay, load_from_checkpoint, 
+    version, vqvae_path, data_dir, log_dir,
+    num_data, epochs, lr_gamma, lr_step_mode, lr_decrease_freq,
+    centroids_path, target_update_rate, margin, gamma, n
+):
     # make sure that relevant dirs exist
     run_name = f'PretrainQNetwork/{env_name}'
     log_dir = os.path.join(log_dir, run_name)
@@ -194,8 +203,8 @@ def main(env_name, batch_size, lr, weight_decay, load_from_checkpoint, version, 
         
     
     # load data
-    train_data = datasets.PretrainQNetIterableData(env_name, data_dir, centroids, n, gamma)
-    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=6, pin_memory=True)
+    train_data = datasets.PretrainQNetIterableData(env_name, data_dir, centroids, n, gamma, num_workers)
+    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
     
     model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor='Training/Loss', save_last=True, every_n_train_steps=500)
     trainer=pl.Trainer(
@@ -215,6 +224,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
     parser.add_argument('--batch_size', default=100, type=int)
+    parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--lr', default=3e-4, type=float)
     parser.add_argument('--weight_decay', default=1e-5, type=float)
     parser.add_argument('--gamma', default=0.99, type=float)
@@ -223,7 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--vqvae_path', help='Path to encoding model')
-    parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
+    parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
     parser.add_argument('--epochs', default=10, type=int)
