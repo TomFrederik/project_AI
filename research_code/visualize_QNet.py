@@ -53,6 +53,9 @@ def load_traj(env_name, data_dir, model_version, centroids_path, log_dir):
         discount_array = np.array([gamma ** i for i in range(len(actions)-f)])
         true_returns.append(np.sum(discount_array * rewards[f:]))
 
+    # make them numpy again
+    pov_obs = (einops.rearrange(pov_ovs.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
+    vec_ovs = vec_obs.cpu().numpy()
 
     return pov_obs, actions, q_values, true_returns
 
@@ -73,17 +76,23 @@ def main(
         pov_obs = st.session_state.pov_obs
         # interactive setup
         st.title(f'PretrainedQNetwork - {env_name} - version {model_version}')
+        
         if 'frame' not in st.session_state:
             st.session_state.frame = 0
+        
+        if 'slider_frame' in st.session_state:
+            st.session_state.frame = st.session_state.slider_frame
+        
         if st.sidebar.button(label='Next Frame'):
             st.session_state.frame += 1
-        st.session_state.slider_frame = st.sidebar.slider(label='Frame', min_value=0, max_value=len(pov_obs)-1, value=st.session_state.frame, step=1, on_change=set_frame)
+        
+        st.session_state.slider_frame = st.sidebar.slider(label='Frame', min_value=0, max_value=len(pov_obs)-1, value=st.session_state.frame, step=1)
         #set_frame() 
         #TODO make it so that I don't have to click twice to make the frame actually update
 
         col1, col2 = st.columns([15,5])
         with col2:
-            st.image(einops.rearrange((pov_obs.cpu().numpy()[st.session_state.frame]*255).astype(np.uint8), 'c h w -> h w c'), width=400, use_column_width=False)
+            st.image(pov_obs[st.session_state.frame], width=400, use_column_width=False)
     
         with col1:
             human_action = st.session_state.actions[st.session_state.frame].item()
@@ -111,12 +120,6 @@ def main(
 
     else:
         raise NotImplementedError('Something went wrong!')
-    
-    
-    
-def set_frame():
-    st.write(st.session_state.slider_frame)
-    st.session_state.frame = st.session_state.slider_frame
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
