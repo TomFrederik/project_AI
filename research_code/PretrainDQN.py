@@ -197,7 +197,7 @@ def main(env_name, batch_size, lr, weight_decay, load_from_checkpoint, version, 
     train_data = datasets.PretrainQNetIterableData(env_name, data_dir, centroids, n, gamma)
     train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=6, pin_memory=True)
     
-    model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor='Training/Loss', save_last=True)
+    model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor='Training/Loss', save_last=True, every_n_train_steps=500)
     trainer=pl.Trainer(
                     precision=32, #32 is normal, 16 is mixed precision
                     progress_bar_refresh_rate=1, #every N batches update progress bar
