@@ -54,7 +54,7 @@ def load_traj(env_name, data_dir, model_version, centroids_path, log_dir):
         true_returns.append(np.sum(discount_array * rewards[f:]))
 
     # make them numpy again
-    pov_obs = (einops.rearrange(pov_ovs.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
+    pov_obs = (einops.rearrange(pov_obs.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
     vec_ovs = vec_obs.cpu().numpy()
 
     return pov_obs, actions, q_values, true_returns
@@ -80,15 +80,11 @@ def main(
         if 'frame' not in st.session_state:
             st.session_state.frame = 0
         
-        if 'slider_frame' in st.session_state:
-            st.session_state.frame = st.session_state.slider_frame
+        st.write(st.session_state.frame)
         
-        if st.sidebar.button(label='Next Frame'):
-            st.session_state.frame += 1
+        st.sidebar.button(label='Next Frame', on_click=next_frame)
         
-        st.session_state.slider_frame = st.sidebar.slider(label='Frame', min_value=0, max_value=len(pov_obs)-1, value=st.session_state.frame, step=1)
-        #set_frame() 
-        #TODO make it so that I don't have to click twice to make the frame actually update
+        slider_frame = st.sidebar.slider(label='Frame', min_value=0, max_value=len(pov_obs)-1, value=st.session_state.frame, step=1, on_change=update_frame, key='slider_frame')
 
         col1, col2 = st.columns([15,5])
         with col2:
@@ -120,6 +116,13 @@ def main(
 
     else:
         raise NotImplementedError('Something went wrong!')
+
+def update_frame():
+    st.session_state.frame = st.session_state.slider_frame
+
+def next_frame():
+    st.session_state.frame += 1
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
