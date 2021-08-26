@@ -14,6 +14,76 @@ from scipy.cluster.vq import kmeans2
 
 # -----------------------------------------------------------------------------
 
+class MLPQuantizer(nn.Module):
+    def __init__(self, num_hiddens, n_embed, embedding_dim):
+        super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.n_embed = n_embed
+
+        self.kld_scale = 10.0
+
+        self.proj = nn.Linear(num_hiddens, embedding_dim)
+        self.embed = nn.Embedding(n_embed, embedding_dim)
+        #print(self.embed.weight.shape) # n_embed x embedding_dim
+
+        self.register_buffer('data_initialized', torch.zeros(1))
+
+    def forward(self, z):
+        B, D = z.size()
+
+        # project and flatten out space, so (B, C, H, W) -> (B*H*W, C)
+        z_e = self.proj(z)
+        z_e = z_e.permute(0, 2, 3, 1) # make (B, H, W, C)
+        flatten = z_e.reshape(-1, self.embedding_dim)
+        z_e = 
+        # DeepMind def does not do this but I find I have to... ;\
+        if self.training and self.data_initialized.item() == 0:
+            print('running kmeans!!') # data driven initialization for the embeddings
+            rp = torch.randperm(flatten.size(0))
+            kd = kmeans2(flatten[rp[:20000]].data.cpu().numpy(), self.n_embed, minit='points')
+            self.embed.weight.data.copy_(torch.from_numpy(kd[0]))
+            self.data_initialized.fill_(1)
+            # TODO: this won't work in multi-GPU setups
+
+        dist = self.get_dist(flatten)
+        _, ind = (-dist).max(1)
+        ind = einops.rearrange(ind, '(B H W) -> B H W', B=B, H=H, W=W)
+        log_priors = nn.functional.log_softmax(einops.rearrange((-dist), '(B H W) D -> B D H W', B=B, H=H, W=W), dim=1)
+
+        # vector quantization cost that trains the embedding vectors
+        z_q = self.embed_code(ind) # (B, H, W, C)
+        commitment_cost = 0.25
+        diff = commitment_cost * (z_q.detach() - z_e).pow(2).mean() + (z_q - z_e.detach()).pow(2).mean()
+        diff *= self.kld_scale
+
+        z_q = z_e + (z_q - z_e).detach() # noop in forward pass, straight-through gradient estimator in backward pass
+        z_q = z_q.permute(0, 3, 1, 2) # stack encodings into channels again: (B, C, H, W)
+        return z_q, diff, ind, log_priors
+
+    def get_dist(self, flat_z):
+        '''
+        returns distance from z to each embedding vec
+        flat_z should be of shape (B*H*W, C), e.g. (10*16*16, 256)
+        '''
+        dist = (
+            flat_z.pow(2).sum(1, keepdim=True)
+            - 2 * flat_z @ self.embed.weight.t()
+            + self.embed.weight.pow(2).sum(1, keepdim=True).t()
+        )
+        return dist
+
+    def embed_code(self, embed_id):
+        return F.embedding(embed_id, self.embed.weight)
+    
+    def embed_one_hot(self, embed_vec):
+        '''
+        embed vec is of shape (B * T * H * W, n_embed)
+        '''
+        return embed_vec @ self.embed.weight
+
+
+
 class VQVAEQuantize(nn.Module):
     """
     Neural Discrete Representation Learning, van den Oord et al. 2017
