@@ -26,7 +26,6 @@ from vqvae_model.quantize import VQVAEQuantize, GumbelQuantize
 from vqvae_model.loss import Normal, LogitLaplace
 
 import datasets
-torch.backends.cudnn.benchmark = True
 
 # -----------------------------------------------------------------------------
 
@@ -68,14 +67,9 @@ class VQVAE(pl.LightningModule):
     
     @torch.no_grad()
     def reconstruct_only(self, x):
-        print('encoding')
         z = self.encoder(self.recon_loss.inmap(x))
-        print('quantizing')
         z_q, *_ = self.quantizer(z)
-        print(z_q.shape)
-        print('decoding')
         x_hat = self.decoder(z_q)
-        print('unmapping')
         x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
     
