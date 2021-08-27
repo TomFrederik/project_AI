@@ -68,9 +68,14 @@ class VQVAE(pl.LightningModule):
     
     @torch.no_grad()
     def reconstruct_only(self, x):
+        print('encoding')
         z = self.encoder(self.recon_loss.inmap(x))
-        z_q, _, _ = self.quantizer(z)
+        print('quantizing')
+        z_q, *_ = self.quantizer(z)
+        print(z_q.shape)
+        print('decoding')
         x_hat = self.decoder(z_q)
+        print('unmapping')
         x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
     

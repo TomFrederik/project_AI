@@ -23,6 +23,7 @@ class ResBlock(nn.Module):
         out = self.conv(x)
         out += x
         out = F.relu(out)
+        print('Resnet over')
         return out
 
 
@@ -65,4 +66,10 @@ class DeepMindDecoder(nn.Module):
         )
 
     def forward(self, x):
-        return self.net(x)
+        out = x
+        print(x.shape)
+        for m in self.net:
+            out = m(out)
+            print(out.shape)
+        return out
+        #return self.net(x)
