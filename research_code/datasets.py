@@ -7,6 +7,7 @@ import numpy as np
 import os
 import random
 import einops
+from vqvae import VQVAE
 from itertools import chain
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
@@ -371,7 +372,7 @@ class PretrainQNetIterableData(IterableDataset):
             worker_id = torch.utils.data.get_worker_info().id
             return self._get_stream_of_trajectories(self.names_per_worker[worker_id])
         
-        
+       
 class PretrainQNetData(Dataset):
 
     def __init__(self, env_name, data_dir, centroids, n, gamma, num_data=0):
@@ -463,6 +464,59 @@ class PretrainQNetData(Dataset):
         
         return pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs
 
+class StateVQVAEData(IterableDataset):
+    def __init__(self, framevqvae, env_name, data_dir, device, num_workers):
+        super().__init__()
+        
+        self.device = device
+        self.num_workers = num_workers
+        self.pipeline = minerl.data.make(env_name, data_dir)
+        self.names = self.pipeline.get_trajectory_names()
+        random.shuffle(self.names)
+
+        if self.num_workers > 0:
+            trajectories_per_worker = len(self.names) // self.num_workers
+            self.names_per_worker = {
+                worker_id: self.names[trajectories_per_worker * worker_id:trajectories_per_worker*(worker_id+1)] for worker_id in range(self.num_workers)
+            }
+            
+        # load vqvae model
+        self.vqvae = VQVAE.load_from_checkpoint(framevqvae).to(device)
+        self.vqvae.eval()
+        self.encoding_batch_size = 500
+        
+    def _load_trajectory(self, name):
+        # load trajectory data
+        data = self.pipeline.load_data(name)
+        
+        # unpack data
+        obs, actions, *_ = zip(*data)
+        pov_obs, vec_obs = [item['pov'] for item in obs], [item['vector'] for item in obs]
+        pov_obs = einops.rearrange(np.array(pov_obs), 'b h w c -> b c h w').astype(np.float32) / 255
+        vec_obs = np.array(vec_obs).astype(np.float32)
+        actions = np.array([ac['vector'] for ac in actions]).astype(np.float32)
+        # TODO discretize actions?
+        
+        # encode pov obs
+        enc_pov_obs = []
+        for i in range(pov_obs // self.encoding_batch_size + 1):
+            enc_pov_obs.append(self.vqvae.encode_only(torch.from_numpy(pov_obs[i * self.encoding_batch_size:(i+1) * self.encoding_batch_size]).to(self.device))[0])
+        pov_obs = torch.cat(enc_pov_obs, dim=0)
+
+        return pov_obs, vec_obs, actions
+
+    def _get_stream_of_trajectories(self, names):
+        for name in names:
+            yield self._load_trajectory(name)
+        
+    def __iter__(self):
+        if self.num_workers == 0:
+            return self._get_stream_of_trajectories(self.names)
+        else:
+            worker_id = torch.utils.data.get_worker_info().id
+            return self._get_stream_of_trajectories(self.names_per_worker[worker_id])
+
+
 
 class BehavCloneData(Dataset):
 
@@ -489,36 +543,4 @@ class BehavCloneData(Dataset):
         return pov, self.vec_obs[idx].astype(np.float32), act
 
 
-class TrajData(Dataset):
 
-    def __init__(self, env_name, data_dir, num_workers, num_frames):
-
-        self.data = minerl.data.make(env_name, data_dir, num_workers)
-        self.traj_names = data.get_trajectory_names()
-        random.shuffle(self.traj_names)
-
-        # get next traj
-        self.cur_traj = next(self._data_generator)
-        self.pointer = len(self.cur_traj)-num_frames
-
-    def __len__(self):
-        pass
-    '''
-    def __getitem__(self, idx):
-        sar = self.cur_traj[self.pointer:self.pointer+self.num_frames]
-        pov = sar[0]['pov']
-        vec = sar[0]['vec']
-        act = sar[1]['vector']
-        rew = sar[2]
-        #TODO currently not using idx --> am shuffling trajectories in beginning but not batches..
-        # update pointer
-        self.pointer = self.pointer - self.num_frames
-
-        return pov, vec, act
-
-
-    def _data_generator(self):
-        for name in self.traj_names:
-            traj_data = self.data.load_data(name, skip_interval=0, include_metadata=False)
-            yield traj_data
-    '''
