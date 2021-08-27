@@ -36,7 +36,7 @@ class MLPQuantizer(nn.Module):
         z_e = self.proj(z)
         z_e = z_e.permute(0, 2, 3, 1) # make (B, H, W, C)
         flatten = z_e.reshape(-1, self.embedding_dim)
-        z_e = 
+        z_e = 0
         # DeepMind def does not do this but I find I have to... ;\
         if self.training and self.data_initialized.item() == 0:
             print('running kmeans!!') # data driven initialization for the embeddings
