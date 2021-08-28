@@ -1,11 +1,11 @@
 import argparse
 import streamlit as st
-import vqvae
 import os
 import minerl
 import numpy as np
 import torch
 import einops
+from state_vqvae import StateVQVAE
 import matplotlib.pyplot as plt
 from time import time
 
@@ -16,9 +16,9 @@ def init(env_name, model_path, data_dir):
         st.session_state.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # load model
-    model = vqvae.VQVAE.load_from_checkpoint(model_path).to(st.session_state.device)
+    model = StateVQVAE.load_from_checkpoint(model_path).to(st.session_state.device)
     model.eval()
-
+    
     # init env
     pipeline = minerl.data.make(env_name, data_dir)
     traj_names = pipeline.get_trajectory_names()
@@ -29,34 +29,41 @@ def load_traj_data(pipeline, traj_name):
     traj_data = pipeline.load_data(traj_name)
     
     # unpack data
-    obs, *_ = zip(*traj_data)
-    pov_obs = [item['pov'] for item in obs]
+    obs, actions, *_ = zip(*traj_data)
+    pov_obs, vec_obs = [item['pov'] for item in obs], [item['vector'] for item in obs]
+    actions = [ac['vector'] for ac in actions]
     pov_obs = torch.from_numpy(einops.rearrange(np.array(pov_obs), 'b h w c -> b c h w').astype(np.float32) / 255).to(st.session_state.device)
+    vec_obs = torch.from_numpy(np.array(vec_obs).astype(np.float32)).to(st.session_state.device)
+    actions = torch.from_numpy(np.array(actions).astype(np.float32)).to(st.session_state.device)
 
-    return pov_obs
+    return pov_obs, vec_obs, actions
 
+@torch.no_grad()
+def reconstruct_data(model, pov_obs, vec_obs, actions):
+    
+    max_seq_len = 200
+    predictions, *_ = model(pov_obs[None,:], vec_obs[None,:], actions[None,:], max_seq_len)
+    predictions = predictions[0]
 
-def reconstruct_data(model, pov_obs):
-    batch_size = 500
+    max_batch_size = 200
     reconstructed_pov = []
-    for i in range(len(pov_obs)//batch_size + 1):
-        reconstructed_pov.append(model.reconstruct_only(pov_obs[batch_size*i:batch_size*(i+1)]))
-        
+    for i in range(len(predictions)//max_batch_size + 1):
+        reconstructed_pov.append(st.session_state.model.vqvae.decode_only(predictions[max_batch_size*i:max_batch_size*(i+1)]))
+
     reconstructed_pov = torch.cat(reconstructed_pov, dim=0)
 
     return reconstructed_pov
 
 def select_traj(traj_name=None):
     if traj_name == None:
-        pov = load_traj_data(st.session_state.pipeline, st.session_state.selected_traj)
+        pov, vec_obs, actions = load_traj_data(st.session_state.pipeline, st.session_state.selected_traj)
     else:
-        pov = load_traj_data(st.session_state.pipeline,traj_name)
-    rec_pov = reconstruct_data(st.session_state.model, pov)
-
+        pov, vec_obs, actions = load_traj_data(st.session_state.pipeline,traj_name)
+    rec_pov = reconstruct_data(st.session_state.model, pov, vec_obs, actions)
+    pov = pov[1:]
     st.session_state.all_losses = ((rec_pov - pov) ** 2).mean(dim=[1,2,3]).cpu().numpy()
     st.session_state.pov = (einops.rearrange(pov.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
     st.session_state.rec_pov = (einops.rearrange(rec_pov.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
-
 
 def update_frame():
     st.session_state.frame = st.session_state.slider_frame
@@ -111,7 +118,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
-    parser.add_argument('--model_path', type=str, default="/home/lieberummaas/datadisk/minerl/run_logs/VQVAE/MineRLTreechopVectorObf-v0/lightning_logs/version_14/checkpoints/last.ckpt")
+    parser.add_argument('--model_path', type=str, default="/home/lieberummaas/datadisk/minerl/run_logs/StateVQVAE/MineRLTreechopVectorObf-v0/lightning_logs/version_2/checkpoints/epoch=0-step=9.ckpt")
     parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
     
     args = parser.parse_args()

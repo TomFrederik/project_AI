@@ -7,7 +7,6 @@ import numpy as np
 import os
 import random
 import einops
-from vqvae import VQVAE
 from itertools import chain
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
@@ -464,27 +463,14 @@ class PretrainQNetData(Dataset):
         
         return pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs
 
-class StateVQVAEData(IterableDataset):
-    def __init__(self, framevqvae, env_name, data_dir, device, num_workers):
+class StateVQVAEData(Dataset):
+    def __init__(self, env_name, data_dir, num_workers):
         super().__init__()
         
-        self.device = device
         self.num_workers = num_workers
         self.pipeline = minerl.data.make(env_name, data_dir)
         self.names = self.pipeline.get_trajectory_names()
-        random.shuffle(self.names)
 
-        if self.num_workers > 0:
-            trajectories_per_worker = len(self.names) // self.num_workers
-            self.names_per_worker = {
-                worker_id: self.names[trajectories_per_worker * worker_id:trajectories_per_worker*(worker_id+1)] for worker_id in range(self.num_workers)
-            }
-            
-        # load vqvae model
-        self.vqvae = VQVAE.load_from_checkpoint(framevqvae).to(device)
-        self.vqvae.eval()
-        self.encoding_batch_size = 500
-        
     def _load_trajectory(self, name):
         # load trajectory data
         data = self.pipeline.load_data(name)
@@ -496,25 +482,14 @@ class StateVQVAEData(IterableDataset):
         vec_obs = np.array(vec_obs).astype(np.float32)
         actions = np.array([ac['vector'] for ac in actions]).astype(np.float32)
         # TODO discretize actions?
-        
-        # encode pov obs
-        enc_pov_obs = []
-        for i in range(pov_obs // self.encoding_batch_size + 1):
-            enc_pov_obs.append(self.vqvae.encode_only(torch.from_numpy(pov_obs[i * self.encoding_batch_size:(i+1) * self.encoding_batch_size]).to(self.device))[0])
-        pov_obs = torch.cat(enc_pov_obs, dim=0)
 
         return pov_obs, vec_obs, actions
 
-    def _get_stream_of_trajectories(self, names):
-        for name in names:
-            yield self._load_trajectory(name)
-        
-    def __iter__(self):
-        if self.num_workers == 0:
-            return self._get_stream_of_trajectories(self.names)
-        else:
-            worker_id = torch.utils.data.get_worker_info().id
-            return self._get_stream_of_trajectories(self.names_per_worker[worker_id])
+    def __len__(self):
+        return len(self.names)
+    
+    def __getitem__(self, idx):
+        return self._load_trajectory(self.names[idx])
 
 
 

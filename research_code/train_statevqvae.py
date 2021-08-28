@@ -18,18 +18,16 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     print(f'\nSaving logs and model to {log_dir}')
 
     
-    dataset = StateVQVAEData(framevqvae, env_name, data_dir, device, num_workers) # TODO: Implement
+    dataset = StateVQVAEData(env_name, data_dir, num_workers) # TODO: Implement
     
-    num_input_channels = dataset.vqvae.hparams.args.embedding_dim
-    
-    train_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
     
     optim_kwargs = {
         'lr': lr
     }
     model_kwargs ={
         'optim_kwargs':optim_kwargs,
-        'num_input_channels':num_input_channels
+        'framevqvae':framevqvae
     }
     if load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{version}', 'checkpoints', 'last.ckpt')
@@ -38,11 +36,11 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     else:
         model = StateVQVAE(**model_kwargs).to(device)
     
-    callbacks = [ModelCheckpoint(monitor='Training_loss', mode='min', every_n_train_steps=save_freq)]
+    callbacks = [ModelCheckpoint(monitor='Training/loss', mode='min', every_n_train_steps=save_freq)]
     
     trainer = pl.Trainer(
         progress_bar_refresh_rate=1,
-        log_every_n_steps=10,
+        log_every_n_steps=1,
         callbacks=callbacks,
         gpus=torch.cuda.device_count(),
         accelerator='dp',
@@ -62,8 +60,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--epochs', type=int, default=1)
-    parser.add_argument('--save_freq', type=int, default=500)
-    parser.add_argument('--num_workers', type=int, default=6)
+    parser.add_argument('--save_freq', type=int, default=100)
+    parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--version', type=int, default=0, help='Version of model, if training is resumed from checkpoint')
     
