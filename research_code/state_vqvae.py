@@ -51,7 +51,7 @@ class StateVQVAE(pl.LightningModule):
         # quantize
         quantizer_input = einops.rearrange(enc_hidden_state_seq, 'b t d -> (b t) d')
         quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=32, d2=64)
-        discrete_embeddings, latent_loss = self.quantizer(quantizer_input)
+        discrete_embeddings, enc_latent_loss = self.quantizer(quantizer_input)
         discrete_embeddings = einops.rearrange(discrete_embeddings, '(b t) d -> b t d', t=T)
         #print(f'{discrete_embeddings.shape = }')
         #print(f'{latent_loss.shape = }')
@@ -62,16 +62,23 @@ class StateVQVAE(pl.LightningModule):
         
         # decode with lstm
         dec_hidden_state_seq, (dec_last_hidden, dec_last_cell) = self.lstm_decoder(dec_lstm_input, dec_first_hidden, dec_first_cell)
+        quantizer_input = einops.rearrange(dec_hidden_state_seq, 'b t d -> (b t) d')
+        quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=32, d2=64)
+        discrete_embeddings, dec_latent_loss = self.quantizer(quantizer_input)
         #print(f'{dec_hidden_state_seq.shape = }')
+        
+        latent_loss = enc_latent_loss + dec_latent_loss
         
         # apply linear and decode with cnn decoder
         predictions = einops.rearrange(
             self.cnn_decoder(
-                einops.rearrange(self.linear(einops.rearrange(dec_hidden_state_seq, 'b t d -> (b t) d')), 'bt d -> bt d 1 1')
+                einops.rearrange(discrete_embeddings, 'bt d -> bt d 1 1')
             ),
             '(b t) c h w -> b t c h w', 
             t=T
         )
+        
+        
         return predictions, latent_loss, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
 
     def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
