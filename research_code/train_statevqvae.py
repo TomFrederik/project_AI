@@ -8,7 +8,7 @@ import argparse
 import os
 
 
-def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_dir, num_workers, load_from_checkpoint, version):
+def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_dir, num_workers, load_from_checkpoint, version, num_trajs):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # make sure that relevant dirs exist
@@ -18,9 +18,9 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     print(f'\nSaving logs and model to {log_dir}')
 
     
-    dataset = StateVQVAEData(env_name, data_dir, num_workers) # TODO: Implement
+    dataset = StateVQVAEData(env_name, data_dir, num_workers, num_trajs) # TODO: Implement
     
-    train_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
     
     optim_kwargs = {
         'lr': lr
@@ -36,7 +36,7 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     else:
         model = StateVQVAE(**model_kwargs).to(device)
     
-    callbacks = [ModelCheckpoint(monitor='Training/loss', mode='min', every_n_train_steps=save_freq)]
+    callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
     
     trainer = pl.Trainer(
         progress_bar_refresh_rate=1,
@@ -60,6 +60,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--num_trajs', type=int, default=0)
     parser.add_argument('--save_freq', type=int, default=100)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--load_from_checkpoint', action='store_true')

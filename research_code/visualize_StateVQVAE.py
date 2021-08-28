@@ -43,7 +43,7 @@ def reconstruct_data(model, pov_obs, vec_obs, actions):
     
     max_seq_len = 200
     predictions, *_ = model(pov_obs[None,:], vec_obs[None,:], actions[None,:], max_seq_len)
-    predictions = predictions[0]
+    predictions, *_ = model.vqvae.quantizer(predictions[0], proj=False)
 
     max_batch_size = 200
     reconstructed_pov = []
@@ -98,9 +98,9 @@ def main(
     #st.sidebar.slider('Frame:', 0, len(st.session_state.pov)-1, value=0, key='frame')
     slider_frame = st.sidebar.slider(label='Frame', min_value=0, max_value=len(st.session_state.pov)-1, value=st.session_state.frame, step=1, on_change=update_frame, key='slider_frame')
 
-    col1, col2 = st.columns([10,10])
+    col1, col2, col3 = st.columns([10, 10, 10])
     with col1:
-        st.image(st.session_state.pov[st.session_state.frame], width=400)
+        st.image(st.session_state.pov[st.session_state.frame-1], width=300)
 
         fig = plt.figure()
         plt.plot(st.session_state.all_losses)
@@ -109,16 +109,17 @@ def main(
         plt.axvline(st.session_state.frame, color='r', linestyle='--')
         st.pyplot(fig=fig)
     with col2:
-        st.image(st.session_state.rec_pov[st.session_state.frame], width=400)
+        st.image(st.session_state.rec_pov[st.session_state.frame], width=300)
 
         st.text(f'Loss: {st.session_state.all_losses[st.session_state.frame]:.5f}')
-    
+    with col3:
+        st.image(st.session_state.pov[st.session_state.frame], width=300)
     
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
-    parser.add_argument('--model_path', type=str, default="/home/lieberummaas/datadisk/minerl/run_logs/StateVQVAE/MineRLTreechopVectorObf-v0/lightning_logs/version_2/checkpoints/epoch=0-step=9.ckpt")
+    parser.add_argument('--model_path', type=str, default="/home/lieberummaas/datadisk/minerl/run_logs/StateVQVAE/MineRLTreechopVectorObf-v0/lightning_logs/version_16/checkpoints/epoch=0-step=29.ckpt")
     parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
     
     args = parser.parse_args()

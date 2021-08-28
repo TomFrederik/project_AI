@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 import pytorch_lightning as pl
 import einops
@@ -17,8 +18,8 @@ class StateVQVAE(pl.LightningModule):
         self.vqvae = VQVAE.load_from_checkpoint(framevqvae)
         self.vqvae.eval()
         
-        self.encoding_batch_size = 500
-        self.max_seq_len = 1000
+        self.encoding_batch_size = 300
+        self.max_seq_len = 500
 
         num_input_channels = self.vqvae.hparams.args.embedding_dim        
         
@@ -77,7 +78,6 @@ class StateVQVAE(pl.LightningModule):
             t=T
         )
         
-        
         return predictions, latent_loss, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
 
     def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
@@ -128,6 +128,9 @@ class StateVQVAE(pl.LightningModule):
             enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2) # (B T D+A)
             predictions, latent_loss, *_ = self._predict_subsequence(enc_lstm_input, h_0)
         
+        # skip connection
+        #predictions = predictions + pov_obs[:,:-1]
+
         return predictions, pov_obs[:,1:], latent_loss
         
         
@@ -141,7 +144,8 @@ class StateVQVAE(pl.LightningModule):
         # compute loss
         reconstruction_loss = self.loss_fn(predictions, targets)
         loss = reconstruction_loss + latent_loss
-        
+        print(f'attempting backward with sequence of length {pov_obs.shape[1]}...')
+
         # logging
         self.log('Training/loss', loss, on_step=True)
         self.log('Training/reconstruction_loss', reconstruction_loss, on_step=True)
@@ -171,7 +175,8 @@ class StateVQVAE(pl.LightningModule):
         params = []
         for m in self.model_list:
             params += list(m.parameters())
-        torch.optim.AdamW(params, **self.hparams.optim_kwargs)
+        optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
+        return optimizer
     
 
 class CNNEncoder(nn.Module):
@@ -257,8 +262,11 @@ class StateQuantizer(nn.Module):
         # create a separate embedding for every position
         # but in a batched way
         # I think this is equivalent, modulo the initialization via kmeans which will work a bit different in this batched way
-        self.embedding = nn.Embedding(codebook_size, embedding_dim*latent_size)
-        
+        #self.embedding = nn.Embedding(codebook_size, embedding_dim*latent_size)
+        # nevermind.. 
+        self.embedding = nn.Embedding(codebook_size, embedding_dim)
+
+
         self.register_buffer('data_initialized', torch.zeros(1))
         
     def forward(self, z):
@@ -266,29 +274,32 @@ class StateQuantizer(nn.Module):
 
         # this is a bit unnecessary, could just skip the rearrange in the statevqvae
         # basically just included as legacy, to be more recognizable coming from the original paper
-        z = einops.rearrange(z, 'b n d -> b (n d)')        
+        z_e = einops.rearrange(z, 'b n d -> (b n) d')        
         
         # init embedding
         if self.training and self.data_initialized.item() == 0:
             print('Running kmeans to init embeddings')
-            kd = kmeans2(z.data.cpu().numpy(), self.codebook_size, minit='points')
+            kd = kmeans2(z_e.data.cpu().numpy(), self.codebook_size, minit='points')
             self.embedding.weight.data.copy_(torch.from_numpy(kd[0]))
             self.data_initialized.fill_(1)
         
         # compute closest embedding vector
-        dist = self.get_dist(z)
+        dist = self.get_dist(z_e)
         ind = torch.argmin(dist, dim=1)
-        z_q = self.embedding(ind)
+        z_q = self.embed_code(ind)
         
         # compute losses
-        latent_loss = self.commitment_cost * (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
+        latent_loss = self.commitment_cost * (z_q.detach() - z_e).pow(2).mean() + (z_q - z_e.detach()).pow(2).mean()
         latent_loss *= self.kld_scale
         
         # straight through gradient
-        z_q = z + (z_q - z).detach()
-        
+        z_q = z_e + (z_q - z_e).detach()
+        z_q = einops.rearrange(z_q, '(b n) d -> b (n d)', n=N)
         return z_q, latent_loss
-                    
+
+    def embed_code(self, embed_id):
+        return F.embedding(embed_id, self.embedding.weight)
+
     def get_dist(self, z):
         '''
         returns distance from z to each embedding vec

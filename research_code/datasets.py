@@ -464,12 +464,15 @@ class PretrainQNetData(Dataset):
         return pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs
 
 class StateVQVAEData(Dataset):
-    def __init__(self, env_name, data_dir, num_workers):
+    def __init__(self, env_name, data_dir, num_workers, num_trajs):
         super().__init__()
         
+        self.num_trajs = num_trajs
         self.num_workers = num_workers
         self.pipeline = minerl.data.make(env_name, data_dir)
         self.names = self.pipeline.get_trajectory_names()
+        if self.num_trajs > 0:
+            self.names = self.names[:self.num_trajs]
 
     def _load_trajectory(self, name):
         # load trajectory data
