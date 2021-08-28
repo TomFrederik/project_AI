@@ -26,9 +26,8 @@ class StateVQVAE(pl.LightningModule):
         self.cnn_decoder = CNNDecoder(num_input_channels)
         self.lstm_encoder = LSTMEncoder(input_size=2048 + 64, hidden_size=2048)
         self.lstm_decoder = LSTMDecoder(input_size=2048 + 2048, hidden_size=2048)
-        self.linear = nn.Linear(2048, 2048)
         self.quantizer = StateQuantizer(codebook_size=512, embedding_dim=64, latent_size=32) #TODO
-        self.model_list = [self.cnn_encoder, self.cnn_decoder, self.lstm_encoder, self.lstm_decoder, self.linear, self.quantizer]
+        self.model_list = [self.cnn_encoder, self.cnn_decoder, self.lstm_encoder, self.lstm_decoder, self.quantizer]
         self.loss_fn = nn.MSELoss()
 
         
@@ -69,7 +68,7 @@ class StateVQVAE(pl.LightningModule):
         
         latent_loss = enc_latent_loss + dec_latent_loss
         
-        # apply linear and decode with cnn decoder
+        # decode with cnn decoder
         predictions = einops.rearrange(
             self.cnn_decoder(
                 einops.rearrange(discrete_embeddings, 'bt d -> bt d 1 1')
