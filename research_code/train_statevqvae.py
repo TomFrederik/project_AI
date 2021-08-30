@@ -35,9 +35,12 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     else:
         model = StateVQVAE(**model_kwargs).to(device)
     
-    time1 = time()
-    model.find_data_mean_var(train_loader)
-    print(f'Finding mean and variance of vqvae latent space took {time()-time1:.3f}s')
+    stat_path = os.path.join(framevqvae[:-9], 'stats.json')
+    print(f'{stat_path = }')
+    if os.path.exists(stat_path):
+        model.find_data_mean_var(train_loader, load_from=stat_path)
+    else:
+        model.find_data_mean_var(train_loader, save_to=stat_path)
     
     callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
     

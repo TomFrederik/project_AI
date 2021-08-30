@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import pytorch_lightning as pl
 import einops
+import json
 
 from vqvae import VQVAE
 
@@ -27,7 +28,7 @@ class StateVQVAE(pl.LightningModule):
         self.cnn_decoder = CNNDecoder(num_input_channels)
         self.lstm_encoder = LSTMEncoder(input_size=2048 + 64, hidden_size=2048)
         self.lstm_decoder = LSTMDecoder(input_size=2048 + 2048, hidden_size=2048)
-        self.quantizer = StateQuantizer(codebook_size=512, embedding_dim=64, latent_size=32) #TODO
+        self.quantizer = StateQuantizer(codebook_size=512, embedding_dim=128, latent_size=16) #TODO
         self.model_list = [self.cnn_encoder, self.cnn_decoder, self.lstm_encoder, self.lstm_decoder, self.quantizer]
     
     def loss_fn(self, predictions, targets):
@@ -67,7 +68,7 @@ class StateVQVAE(pl.LightningModule):
         # decode with lstm
         dec_hidden_state_seq, (dec_last_hidden, dec_last_cell) = self.lstm_decoder(dec_lstm_input, dec_first_hidden, dec_first_cell)
         quantizer_input = einops.rearrange(dec_hidden_state_seq, 'b t d -> (b t) d')
-        quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=32, d2=64)
+        quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=16, d2=128)
         discrete_embeddings, dec_latent_loss = self.quantizer(quantizer_input)
         #print(f'{dec_hidden_state_seq.shape = }')
         
@@ -172,19 +173,34 @@ class StateVQVAE(pl.LightningModule):
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
         return optimizer
     
-    def find_data_mean_var(self, dataloader):
-        encoded_povs = []
-        for pov_obs, *_ in dataloader:
-            encoded_povs.append(self._apply_frame_encoding(pov_obs.to(self.device))[0])
-            print(f'{encoded_povs[-1].shape = }')
-        encoded_povs = einops.rearrange(torch.cat(encoded_povs, dim=0), 'b c h w -> (b c h w)')
-        self.data_mean = encoded_povs.mean()
-        self.data_var = encoded_povs.var()
-        self.data_max = encoded_povs.max()
+    def find_data_mean_var(self, dataloader=None, load_from=None, save_to="./stats.json"):
+        if load_from is None:
+            if dataloader is None:
+                raise ValueError('Need to specify either dataloader or file to load stats from')
+            encoded_povs = []
+            for batch_id, batch in enumerate(dataloader):
+                print(f'{batch_id = }')
+                pov_obs = batch[0]
+                encoded_povs.append(self._apply_frame_encoding(pov_obs.to(self.device)).to('cpu')[0])
+                print(f'{encoded_povs[-1].shape = }')
+            encoded_povs = einops.rearrange(torch.cat(encoded_povs, dim=0), 'b c h w -> (b c h w)')
+            self.data_mean = encoded_povs.mean().item()
+            self.data_var = encoded_povs.var().item()
+            self.data_max = encoded_povs.max().item()
+
+            with open(save_to, 'w') as f:
+                json.dumps(dict(mean=self.data_mean, var=self.data_var, max=self.data_max))
+        else:
+            with open(load_from) as f:
+                stats = json.load(f)
+            self.data_mean = stats['mean']
+            self.data_var = stats['var']
+            self.data_max = stats['max']
+
         print(f'\n{self.data_mean = }')
         print(f'{self.data_var = }')
         print(f'{self.data_max = }\n')
-
+        
 class CNNEncoder(nn.Module):
     def __init__(self, num_input_channels):
         super().__init__()

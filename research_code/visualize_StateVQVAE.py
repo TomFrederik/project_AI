@@ -17,6 +17,12 @@ def init(env_name, model_path, data_dir):
 
     # load model
     model = StateVQVAE.load_from_checkpoint(model_path).to(st.session_state.device)
+    stat_path = os.path.join(model.hparams.framevqvae[:-9], 'stats.json')
+    print(f'{stat_path = }')
+    if os.path.exists(stat_path):
+        model.find_data_mean_var(load_from=stat_path)
+    else:
+        raise NotImplementedError(f"stat_path {stat_path} should exist but doesn't")
     model.eval()
     
     # init env
