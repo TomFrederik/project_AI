@@ -329,6 +329,7 @@ class PretrainQNetIterableData(IterableDataset):
         self.names = self.pipeline.get_trajectory_names()
         random.shuffle(self.names)
 
+        # split trajectories between workers
         if self.num_workers > 0:
             trajectories_per_worker = len(self.names) // self.num_workers
             self.names_per_worker = {

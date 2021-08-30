@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 import argparse
 import os
-
+from time import time
 
 def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_dir, num_workers, load_from_checkpoint, version, num_trajs):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -17,7 +17,6 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     os.makedirs(log_dir, exist_ok=True)
     print(f'\nSaving logs and model to {log_dir}')
 
-    
     dataset = StateVQVAEData(env_name, data_dir, num_workers, num_trajs) # TODO: Implement
     
     train_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
@@ -35,6 +34,10 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
         model = StateVQVAE.load_from_checkpoint(checkpoint_file, **model_kwargs)
     else:
         model = StateVQVAE(**model_kwargs).to(device)
+    
+    time1 = time()
+    model.find_data_mean_var(train_loader)
+    print(f'Finding mean and variance of vqvae latent space took {time()-time1:.3f}s')
     
     callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
     
