@@ -29,9 +29,10 @@ class StateVQVAE(pl.LightningModule):
         self.lstm_decoder = LSTMDecoder(input_size=2048 + 2048, hidden_size=2048)
         self.quantizer = StateQuantizer(codebook_size=512, embedding_dim=64, latent_size=32) #TODO
         self.model_list = [self.cnn_encoder, self.cnn_decoder, self.lstm_encoder, self.lstm_decoder, self.quantizer]
-        self.loss_fn = nn.MSELoss()
-
-        
+    
+    def loss_fn(self, predictions, targets):
+        return ((predictions - targets) ** 2).mean() / (2 * self.data_var)
+    
     def _apply_frame_encoding(self, pov_obs):
         # encode pov obs
         t = pov_obs.shape[1]
@@ -90,6 +91,10 @@ class StateVQVAE(pl.LightningModule):
         # apply frame vqvae
         pov_obs = self._apply_frame_encoding(pov_obs)
         
+        # normalize and center
+        pov_obs /= self.data_max
+        pov_obs -= self.data_mean
+        
         B, T, C, H, W = pov_obs.shape
         #print('B, T, C, H, W = ', B, T, C, H, W)
         
@@ -133,6 +138,10 @@ class StateVQVAE(pl.LightningModule):
         
         # skip connection
         #predictions = predictions + pov_obs[:,:-1]
+        
+        # uncenter and unnormalize
+        predictions += self.data_mean
+        predictions *= self.data_max
 
         return predictions, pov_obs[:,1:], latent_loss
         
@@ -156,24 +165,6 @@ class StateVQVAE(pl.LightningModule):
         
         return loss
     
-    def validation_step(self, batch, batch_idx):
-        # unpack batch
-        pov_obs, vec_obs, actions = batch
-        
-        # make predictions
-        predictions, targets, latent_loss = self(pov_obs, vec_obs, actions)
-        
-        # compute loss
-        reconstruction_loss = self.loss_fn(predictions, targets)
-        loss = reconstruction_loss + latent_loss
-        
-        # logging
-        self.log('Validation/loss', loss, on_epoch=True)
-        self.log('Validation/reconstruction_loss', reconstruction_loss, on_epoch=True)
-        self.log('Validation/latent_loss', latent_loss, on_epoch=True)
-        
-        return loss
-    
     def configure_optimizers(self):
         params = []
         for m in self.model_list:
@@ -181,6 +172,18 @@ class StateVQVAE(pl.LightningModule):
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
         return optimizer
     
+    def find_data_mean_var(self, dataloader):
+        encoded_povs = []
+        for pov_obs, *_ in dataloader:
+            encoded_povs.append(self._apply_frame_encoding(pov_obs.to(self.device))[0])
+            print(f'{encoded_povs[-1].shape = }')
+        encoded_povs = einops.rearrange(torch.cat(encoded_povs, dim=0), 'b c h w -> (b c h w)')
+        self.data_mean = encoded_povs.mean()
+        self.data_var = encoded_povs.var()
+        self.data_max = encoded_povs.max()
+        print(f'\n{self.data_mean = }')
+        print(f'{self.data_var = }')
+        print(f'{self.data_max = }\n')
 
 class CNNEncoder(nn.Module):
     def __init__(self, num_input_channels):
