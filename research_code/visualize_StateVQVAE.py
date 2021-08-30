@@ -77,10 +77,11 @@ def prev_frame():
 
 def main(
     env_name,
-    model_path,
+    log_dir,
+    version,
     data_dir
     ):
-
+    model_path = os.path.join(log_dir, env_name, 'lightning_logs', 'version_'+str(version), 'checkpoints', 'last.ckpt')
     if 'init' not in st.session_state:
         st.session_state.model, st.session_state.pipeline, st.session_state.traj_names = init(env_name, model_path, data_dir)
         st.session_state.model.eval()
@@ -119,7 +120,8 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
-    parser.add_argument('--model_path', type=str, default="/home/lieberummaas/datadisk/minerl/run_logs/StateVQVAE/MineRLTreechopVectorObf-v0/lightning_logs/version_16/checkpoints/epoch=0-step=29.ckpt")
+    parser.add_argument('--log_dir', type=str, default="/home/lieberummaas/datadisk/minerl/run_logs/StateVQVAE")
+    parser.add_argument('--version', type=int, default=0)
     parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
     
     args = parser.parse_args()

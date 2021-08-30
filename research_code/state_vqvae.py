@@ -49,15 +49,18 @@ class StateVQVAE(pl.LightningModule):
         #print(f'{enc_hidden_state_seq.shape = }')
         
         # quantize
+        '''
         quantizer_input = einops.rearrange(enc_hidden_state_seq, 'b t d -> (b t) d')
         quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=32, d2=64)
         discrete_embeddings, enc_latent_loss = self.quantizer(quantizer_input)
         discrete_embeddings = einops.rearrange(discrete_embeddings, '(b t) d -> b t d', t=T)
         #print(f'{discrete_embeddings.shape = }')
         #print(f'{latent_loss.shape = }')
+        '''
+        enc_latent_loss = 0
         
         # prepare decoder input
-        dec_lstm_input = torch.cat([discrete_embeddings, encoded_images[:,:-1], actions[:,:-1]], dim=2)
+        dec_lstm_input = torch.cat([enc_hidden_state_seq, encoded_images[:,:-1], actions[:,:-1]], dim=2)
         #print(f'{dec_lstm_input.shape = }')
         
         # decode with lstm
@@ -144,7 +147,7 @@ class StateVQVAE(pl.LightningModule):
         # compute loss
         reconstruction_loss = self.loss_fn(predictions, targets)
         loss = reconstruction_loss + latent_loss
-        print(f'attempting backward with sequence of length {pov_obs.shape[1]}...')
+        #print(f'attempting backward with sequence of length {pov_obs.shape[1]}...')
 
         # logging
         self.log('Training/loss', loss, on_step=True)
@@ -183,17 +186,17 @@ class CNNEncoder(nn.Module):
     def __init__(self, num_input_channels):
         super().__init__()
         self.conv_net = nn.Sequential(
-            nn.Conv2d(in_channels=num_input_channels, out_channels=256, kernel_size=3, padding=1, stride=1), # input shape is (16,16)
-            nn.AdaptiveAvgPool2d(output_size=(8,8)),
+            nn.Conv2d(in_channels=num_input_channels, out_channels=256, kernel_size=3, padding=1, stride=2), # input shape is (16,16)
+            #nn.AdaptiveAvgPool2d(output_size=(8,8)),
             nn.GELU(),
-            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=1),
-            nn.AdaptiveAvgPool2d(output_size=(4,4)),
+            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2),
+            #nn.AdaptiveAvgPool2d(output_size=(4,4)),
             nn.GELU(),
-            nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=3, padding=1, stride=1),
-            nn.AdaptiveAvgPool2d(output_size=(2,2)),
+            nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=3, padding=1, stride=2),
+            #nn.AdaptiveAvgPool2d(output_size=(2,2)),
             nn.GELU(),
-            nn.Conv2d(in_channels=1024, out_channels=1984, kernel_size=3, padding=1, stride=1),
-            nn.AdaptiveAvgPool2d(output_size=(1,1))
+            nn.Conv2d(in_channels=1024, out_channels=1984, kernel_size=3, padding=1, stride=2),
+            #nn.AdaptiveAvgPool2d(output_size=(1,1))
         )
     def forward(self, x):
         return self.conv_net(x)
@@ -202,17 +205,13 @@ class CNNDecoder(nn.Module):
     def __init__(self, num_output_channels):
         super().__init__()
         self.conv_net = nn.Sequential(
-            nn.UpsamplingNearest2d((2,2)),
-            nn.Conv2d(2048, 1024, 3, 1, 1),
+            nn.ConvTranspose2d(in_channels=2048, out_channels=1024, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
             nn.GELU(),
-            nn.UpsamplingNearest2d((4,4)),
-            nn.Conv2d(1024, 512, 3, 1, 1),
+            nn.ConvTranspose2d(in_channels=1024, out_channels=512, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
             nn.GELU(),
-            nn.UpsamplingNearest2d((8,8)),
-            nn.Conv2d(512, 256, 3, 1, 1),
+            nn.ConvTranspose2d(in_channels=512, out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 4 -> 8
             nn.GELU(),
-            nn.UpsamplingNearest2d((16,16)),
-            nn.Conv2d(256, num_output_channels, 3, 1, 1)
+            nn.ConvTranspose2d(in_channels=256, out_channels=num_output_channels, kernel_size=3, padding=1, stride=2, output_padding=1) # 8 -> 16
         )
     def forward(self, x):
         return self.conv_net(x)
