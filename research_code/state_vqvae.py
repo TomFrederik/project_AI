@@ -11,7 +11,7 @@ from scipy.cluster.vq import kmeans2
 
 
 class StateVQVAE(pl.LightningModule):
-    def __init__(self, optim_kwargs, framevqvae):
+    def __init__(self, optim_kwargs, framevqvae, embedding_dim, latent_size):
         super().__init__()
         self.save_hyperparameters()
         
@@ -28,7 +28,7 @@ class StateVQVAE(pl.LightningModule):
         self.cnn_decoder = CNNDecoder(num_input_channels)
         self.lstm_encoder = LSTMEncoder(input_size=2048 + 64, hidden_size=2048)
         self.lstm_decoder = LSTMDecoder(input_size=2048 + 2048, hidden_size=2048)
-        self.quantizer = StateQuantizer(codebook_size=512, embedding_dim=128, latent_size=16) #TODO
+        self.quantizer = StateQuantizer(codebook_size=512, embedding_dim=embedding_dim, latent_size=latent_size) #TODO
         self.model_list = [self.cnn_encoder, self.cnn_decoder, self.lstm_encoder, self.lstm_decoder, self.quantizer]
     
     def loss_fn(self, predictions, targets):
@@ -68,7 +68,7 @@ class StateVQVAE(pl.LightningModule):
         # decode with lstm
         dec_hidden_state_seq, (dec_last_hidden, dec_last_cell) = self.lstm_decoder(dec_lstm_input, dec_first_hidden, dec_first_cell)
         quantizer_input = einops.rearrange(dec_hidden_state_seq, 'b t d -> (b t) d')
-        quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=16, d2=128)
+        quantizer_input = einops.rearrange(quantizer_input, 'bt (d1 d2) -> bt d1 d2', d1=self.hparams.latent_size, d2=self.hparams.embedding_dim)
         discrete_embeddings, dec_latent_loss = self.quantizer(quantizer_input)
         #print(f'{dec_hidden_state_seq.shape = }')
         
