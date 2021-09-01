@@ -8,7 +8,7 @@ import argparse
 import os
 from time import time
 
-def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_dir, num_workers, load_from_checkpoint, version, num_trajs, latent_size, embedding_dim):
+def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_dir, num_workers, load_from_checkpoint, version, num_trajs, embedding_dim, codebook_size, gumbel, tau):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # make sure that relevant dirs exist
@@ -27,8 +27,10 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     model_kwargs ={
         'optim_kwargs':optim_kwargs,
         'framevqvae':framevqvae,
-        'latent_size':latent_size,
-        'embedding_dim':embedding_dim
+        'embedding_dim':embedding_dim,
+        'codebook_size':codebook_size,
+        'gumbel':gumbel,
+        'tau':tau
     }
     if load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{version}', 'checkpoints', 'last.ckpt')
@@ -37,12 +39,14 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     else:
         model = StateVQVAE(**model_kwargs).to(device)
     
+    '''
     stat_path = os.path.join(framevqvae[:-9], 'stats.json')
     print(f'{stat_path = }')
     if os.path.exists(stat_path):
         model.find_data_mean_var(train_loader, load_from=stat_path)
     else:
         model.find_data_mean_var(train_loader, save_to=stat_path)
+    '''
     
     callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
     
@@ -74,7 +78,9 @@ if __name__ == '__main__':
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--version', type=int, default=0, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--embedding_dim', type=int, default=64)
-    parser.add_argument('--latent_size', type=int, default=32)
+    parser.add_argument('--codebook_size', type=int, default=32)
+    parser.add_argument('--gumbel', action='store_true')
+    parser.add_argument('--tau', type=float, default=1)
     
     args = parser.parse_args()
     

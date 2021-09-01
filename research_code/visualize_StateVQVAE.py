@@ -28,6 +28,7 @@ def init(env_name, model_path, data_dir):
     # init env
     pipeline = minerl.data.make(env_name, data_dir)
     traj_names = pipeline.get_trajectory_names()
+    traj_names.sort()
 
     return model, pipeline, traj_names
 
@@ -49,9 +50,13 @@ def reconstruct_data(model, pov_obs, vec_obs, actions):
     
     max_seq_len = 200
     predictions, *_ = model(pov_obs[None,:], vec_obs[None,:], actions[None,:], max_seq_len)
-    predictions, *_ = model.vqvae.quantizer(predictions[0], proj=False)
+    predictions = predictions[0]
+    idcs = torch.argmax(predictions, dim=1)
+    predictions = einops.rearrange(model.vqvae.quantizer.embed(idcs), 'b h w c -> b c h w')
+    
+    #predictions, *_ = model.vqvae.quantizer(predictions, proj=False)
 
-    max_batch_size = 200
+    max_batch_size = 500
     reconstructed_pov = []
     for i in range(len(predictions)//max_batch_size + 1):
         reconstructed_pov.append(st.session_state.model.vqvae.decode_only(predictions[max_batch_size*i:max_batch_size*(i+1)]))
@@ -62,13 +67,13 @@ def reconstruct_data(model, pov_obs, vec_obs, actions):
 
 def select_traj(traj_name=None):
     if traj_name == None:
-        pov, vec_obs, actions = load_traj_data(st.session_state.pipeline, st.session_state.selected_traj)
+        pov_obs, vec_obs, actions = load_traj_data(st.session_state.pipeline, st.session_state.selected_traj)
     else:
-        pov, vec_obs, actions = load_traj_data(st.session_state.pipeline,traj_name)
-    rec_pov = reconstruct_data(st.session_state.model, pov, vec_obs, actions)
-    pov = pov[1:]
-    st.session_state.all_losses = ((rec_pov - pov) ** 2).mean(dim=[1,2,3]).cpu().numpy()
-    st.session_state.pov = (einops.rearrange(pov.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
+        pov_obs, vec_obs, actions = load_traj_data(st.session_state.pipeline,traj_name)
+    rec_pov = reconstruct_data(st.session_state.model, pov_obs, vec_obs, actions)
+    pov_obs = pov_obs[1:]
+    st.session_state.all_losses = ((rec_pov - pov_obs) ** 2).mean(dim=[1,2,3]).cpu().numpy()
+    st.session_state.pov = (einops.rearrange(pov_obs.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
     st.session_state.rec_pov = (einops.rearrange(rec_pov.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
 
 def update_frame():
@@ -98,6 +103,7 @@ def main(
             st.session_state.frame = 0
 
     st.sidebar.selectbox('Choose a trajectory:', options=st.session_state.traj_names, index=0, key='selected_traj', on_change=select_traj)
+    st.sidebar.text(f"Current trajectory: {st.session_state.selected_traj}")
 
     st.sidebar.button(label='Previous Frame', on_click=prev_frame)
     st.sidebar.button(label='Next Frame', on_click=next_frame)
@@ -107,6 +113,7 @@ def main(
 
     col1, col2, col3 = st.columns([10, 10, 10])
     with col1:
+        st.text("Current Frame")
         st.image(st.session_state.pov[st.session_state.frame-1], width=300)
 
         fig = plt.figure()
@@ -116,10 +123,13 @@ def main(
         plt.axvline(st.session_state.frame, color='r', linestyle='--')
         st.pyplot(fig=fig)
     with col2:
+        st.text("Prediction")
         st.image(st.session_state.rec_pov[st.session_state.frame], width=300)
 
         st.text(f'Loss: {st.session_state.all_losses[st.session_state.frame]:.5f}')
     with col3:
+        st.text("Next Frame")
+
         st.image(st.session_state.pov[st.session_state.frame], width=300)
     
 if __name__ == '__main__':

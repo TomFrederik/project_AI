@@ -60,7 +60,7 @@ class VQVAE(pl.LightningModule):
 
     def forward(self, x):
         z = self.encoder(x)
-        z_q, latent_loss, ind = self.quantizer(z)
+        z_q, latent_loss, ind, _ = self.quantizer(z)
         x_hat = self.decoder(z_q)
         return x_hat, latent_loss, ind
 
@@ -82,13 +82,13 @@ class VQVAE(pl.LightningModule):
     @torch.no_grad()
     def encode_only(self, x):
         z = self.encoder(self.recon_loss.inmap(x))
-        z_q, _, ind, log_priors = self.quantizer(z)
-        return z_q, ind, log_priors
+        z_q, _, ind, neg_dist = self.quantizer(z)
+        return z_q, ind, neg_dist
     
     def encode_with_grad(self, x):
         z = self.encoder(self.recon_loss.inmap(x))
-        z_q, diff, ind, log_priors = self.quantizer(z)
-        return z_q, diff, ind, log_priors
+        z_q, diff, ind, neg_dist = self.quantizer(z)
+        return z_q, diff, ind, neg_dist
     
     def training_step(self, batch, batch_idx):
         img = batch[1]
@@ -273,8 +273,6 @@ def cli_main():
     parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
     parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
     parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
-    # other model args
-    parser.add_argument('--pre_latent_batchnorm', action='store_true')
 # dataloader related
     parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
     parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
@@ -285,7 +283,7 @@ def cli_main():
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
     parser.add_argument('--version', default=None, type=int, help='Version of model, if training is resumed from checkpoint')
     #other args
-    parser.add_argument('--log_dir')
+    parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerl/run_logs')
     # done!
     args = parser.parse_args()
     # -------------------------------------------------------------------------
@@ -303,8 +301,7 @@ def cli_main():
             'embedding_dim':args.embedding_dim, 
             'n_hid':args.n_hid, 
             'num_embeddings':args.num_embeddings,
-            'loss_flavor':args.loss_flavor,
-            'pre_latent_batchnorm':pre_latent_batchnorm
+            'loss_flavor':args.loss_flavor
         })
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')

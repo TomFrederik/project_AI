@@ -468,6 +468,7 @@ class StateVQVAEData(Dataset):
     def __init__(self, env_name, data_dir, num_workers, num_trajs):
         super().__init__()
         
+        self.max_len = 20000
         self.num_trajs = num_trajs
         self.num_workers = num_workers
         self.pipeline = minerl.data.make(env_name, data_dir)
@@ -487,12 +488,13 @@ class StateVQVAEData(Dataset):
         actions = np.array([ac['vector'] for ac in actions]).astype(np.float32)
         # TODO discretize actions?
 
-        return pov_obs, vec_obs, actions
+        return pov_obs[:self.max_len], vec_obs[:self.max_len], actions[:self.max_len]
 
     def __len__(self):
         return len(self.names)
     
     def __getitem__(self, idx):
+        print(f'Loading trajectory {self.names[idx]}..')
         return self._load_trajectory(self.names[idx])
 
 
