@@ -19,20 +19,52 @@ from torch.utils.data import DataLoader, random_split
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-from vqvae_model.deepmind_enc_dec import DeepMindEncoder, DeepMindDecoder
-from vqvae_model.openai_enc_dec import OpenAIEncoder, OpenAIDecoder
-from vqvae_model.openai_enc_dec import Conv2d as PatchedConv2d
-from vqvae_model.quantize import VQVAEQuantize, GumbelQuantize
 from vqvae_model.loss import Normal, LogitLaplace
 
 import datasets
 torch.backends.cudnn.benchmark = True
 
 # -----------------------------------------------------------------------------
+class ActionGumbelQuantizer(nn.Module):
+    """
+    Gumbel Softmax trick quantizer
+    Categorical Reparameterization with Gumbel-Softmax, Jang et al. 2016
+    https://arxiv.org/abs/1611.01144
+    """
+    def __init__(self, codebook_size, embedding_dim, straight_through=False):
+        super().__init__()
 
-class VQVAE(pl.LightningModule):
+        self.embedding_dim = embedding_dim
+        self.codebook_size = codebook_size
 
-    def __init__(self, args):
+        self.straight_through = straight_through
+        self.temperature = 1.0
+        self.kld_scale = 10
+
+        self.embedding = nn.Embedding(codebook_size, embedding_dim)
+
+    def forward(self, z):
+
+        # force hard = True when we are in eval mode, as we must quantize
+        hard = self.straight_through if self.training else True
+        soft_one_hot = F.gumbel_softmax(z, tau=self.temperature, dim=1, hard=hard)
+        #print(f'{z.shape = }')
+        #print(f'{soft_one_hot.shape = }')
+        #print(f'{self.embedding.weight.shape = }')
+        z_q = soft_one_hot @ self.embedding.weight
+        #z_q = einsum('b lat codebook, codebook embed -> b lat embed', soft_one_hot, self.embedding.weight)
+        #print(f'{z_q.shape = }')
+
+        # + kl divergence to the prior loss
+        qy = F.softmax(z, dim=1)
+        latent_loss = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=1).mean()
+        ind = soft_one_hot.argmax(dim=1)
+        return z_q, latent_loss#, ind
+
+
+class ActionVQVAE(pl.LightningModule):
+
+    def __init__(self, input_dim, codebook_size, embedding_dim, log_perplexity):
         super().__init__()
         self.save_hyperparameters()
 
@@ -62,19 +94,10 @@ class VQVAE(pl.LightningModule):
         ) 
 
         # the quantizer module sandwiched between them, +contributes a KL(posterior || prior) loss to ELBO
-        QuantizerModule = {
-            'vqvae': VQVAEQuantize,
-            'gumbel': GumbelQuantize,
-        }[args.vq_flavor]
-        self.quantizer = QuantizerModule(self.encoder.output_channels, args.num_embeddings, args.embedding_dim)
+        self.quantizer = ActionGumbelQuantizer(codebook_size, embedding_dim)
 
         # the data reconstruction loss in the ELBO
-        ReconLoss = {
-            'l2': Normal,
-            'logit_laplace': LogitLaplace,
-            # todo: add vqgan
-        }[args.loss_flavor]
-        self.recon_loss = ReconLoss
+        self.recon_loss = nn.MSELoss()
 
     def forward(self, x):
         z = self.encoder(x)
@@ -85,54 +108,41 @@ class VQVAE(pl.LightningModule):
     
     @torch.no_grad()
     def reconstruct_only(self, x):
-        z = self.encoder(self.recon_loss.inmap(x))
+        z = self.encoder(x)
         z_q, _, _ = self.quantizer(z)
         x_hat = self.decoder(z_q)
-        x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
     
     @torch.no_grad()
     def decode_only(self, z_q):
         x_hat = self.decoder(z_q)
-        x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
 
     @torch.no_grad()
     def encode_only(self, x):
-        z = self.encoder(self.recon_loss.inmap(x))
+        z = self.encoder(x)
         z_q, _, ind, log_priors = self.quantizer(z)
         return z_q, ind, log_priors
     
     def encode_with_grad(self, x):
-        z = self.encoder(self.recon_loss.inmap(x))
+        z = self.encoder(x)
         z_q, diff, ind, log_priors = self.quantizer(z)
         return z_q, diff, ind, log_priors
     
     def training_step(self, batch, batch_idx):
-        img = batch[1]
-        img = self.recon_loss.inmap(img)
-        img_hat, latent_loss, ind = self.forward(img)
-        recon_loss = self.recon_loss.nll(img, img_hat)
+        _, action, *_ = batch
+        prediction, latent_loss, ind = self.forward(action)
+        recon_loss = self.recon_loss(prediction, action)
         loss = recon_loss + latent_loss
-        self.log('Training/batch_loss', loss, on_step=True)
+        self.log('Training/loss', loss, on_step=True)
+        if self.hparams.log_perplexity:
+            if (self.global_step + 1) % self.hparams.perplexity_freq == 0:
+                self.eval()
+                perplexity, cluster_use = self._compute_perplexity(ind)
+                self.train()
+                self.log('perplexity', perplexity, prog_bar=True)
+                self.log('cluster_use', cluster_use, prog_bar=True)
         return loss
-
-    def validation_step(self, batch, batch_idx):
-        img = batch[1]
-        img = self.recon_loss.inmap(img)
-        img_hat, latent_loss, ind = self.forward(img)
-        recon_loss = self.recon_loss.nll(img, img_hat)
-        loss = recon_loss + latent_loss
-        self.log('Validation/loss', loss, on_epoch=True)
-        return loss
-
-        # debugging: cluster perplexity. when perplexity == num_embeddings then all clusters are used exactly equally
-        encodings = F.one_hot(ind, self.quantizer.n_embed).float().reshape(-1, self.quantizer.n_embed)
-        avg_probs = encodings.mean(0)
-        perplexity = (-(avg_probs * torch.log(avg_probs + 1e-10)).sum()).exp()
-        cluster_use = torch.sum(avg_probs > 0)
-        self.log('val_perplexity', perplexity, prog_bar=True)
-        self.log('val_cluster_use', cluster_use, prog_bar=True)
 
     def configure_optimizers(self):
 
@@ -207,155 +217,80 @@ class DecayLR(pl.Callback):
             g['lr'] = t
 
 
-class GenerateCallback(pl.Callback):
-    def __init__(self, batch_size=6, every_n_epochs=1, dataset=None, save_to_disk=False, every_n_batches=100, precision=32):
-        """
-        Inputs:
-            batch_size - Number of images to generate
-            every_n_epochs - Only save those images every N epochs (otherwise tensorboard gets quite large)
-            dataset - Dataset to sample from
-            save_to_disk - If True, the samples and image means should be saved to disk as well.
-        """
-        super().__init__()
-        self.batch_size = batch_size
-        self.every_n_epochs = every_n_epochs
-        self.every_n_batches = every_n_batches
-        self.save_to_disk = save_to_disk
-        self.dataset = dataset
-
-        #x_samples, x_mean = pl_module.sample(self.batch_size)
-        idx = np.random.choice(len(self.dataset), replace=False, size=self.batch_size)
-        batch = [self.dataset[i] for i in idx]
-        self.img_batch = torch.stack([b[1] for b in batch], dim=0)
-        if precision == 16:
-            self.img_batch = self.img_batch.half()
-
-    def on_epoch_end(self, trainer, pl_module):
-        """
-        This function is called after every epoch.
-        Call the save_and_sample function every N epochs.
-        """
-        if (trainer.current_epoch+1) % self.every_n_epochs == 0:
-            self.sample_and_save(trainer, pl_module, trainer.current_epoch+1)
-    
-    def on_batch_end(self, trainer, pl_module):
-        """
-        This function is called after every epoch.
-        Call the save_and_sample function every N epochs.
-        """
-        if (pl_module.global_step+1) % self.every_n_batches == 0:
-            self.sample_and_save(trainer, pl_module, pl_module.global_step+1)
-
-    def sample_and_save(self, trainer, pl_module, epoch):
-        """
-        Function that generates and save samples from the VAE.
-        The generated samples and mean images should be added to TensorBoard and,
-        if self.save_to_disk is True, saved inside the logging directory.
-        Inputs:
-            trainer - The PyTorch Lightning "Trainer" object.
-            pl_module - The VAE model that is currently being trained.
-            epoch - The epoch number to use for TensorBoard logging and saving of the files.
-        """
-        # Hints:
-        # - You can access the logging directory path via trainer.logger.log_dir, and
-        # - You can access the tensorboard logger via trainer.logger.experiment
-        # - Use the torchvision function "make_grid" to create a grid of multiple images
-        # - Use the torchvision function "save_image" to save an image grid to disk 
-
-        #x_samples, x_mean = pl_module.sample(self.batch_size)
-        
-        if self.img_batch.device != pl_module.device:
-            self.img_batch = self.img_batch.to(pl_module.device)
-
-        reconstructed_img = pl_module.reconstruct_only(self.img_batch)
-
-        images = torch.stack([self.img_batch, reconstructed_img], dim=1).reshape((self.batch_size * 2, *self.img_batch.shape[1:]))
-
-        # log images to tensorboard
-        trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
 
 
-def cli_main():
+def main():
     pl.seed_everything(1337)
 
     # -------------------------------------------------------------------------
     # arguments...
     parser = ArgumentParser()
-    # training related
-    parser = pl.Trainer.add_argparse_args(parser)
-    # model type
-    parser.add_argument("--vq_flavor", type=str, default='vqvae', choices=['vqvae', 'gumbel'])
-    parser.add_argument("--enc_dec_flavor", type=str, default='deepmind', choices=['deepmind', 'openai'])
-    parser.add_argument("--loss_flavor", type=str, default='l2', choices=['l2', 'logit_laplace'])
-    # model size
-    parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
-    parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
-    parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
-    # other model args
-    parser.add_argument('--pre_latent_batchnorm', action='store_true')
-# dataloader related
-    parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
-    parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_workers", type=int, default=6)
-    parser.add_argument("--val_perc", type=float, default=0.001)
-    # model loading args
-    parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
-    parser.add_argument('--version', default=None, type=int, help='Version of model, if training is resumed from checkpoint')
-    #other args
-    parser.add_argument('--log_dir')
-    # done!
+    parser.add_argument('--env_name', type=str, default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
+    parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
+    parser.add_argument('--log_freq', type=int, default=10, help='How often to save values to the logger')
+    parser.add_argument('--log_perplexity', action='store_true')
+    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--num_trajs', type=int, default=0)
+    parser.add_argument('--save_freq', type=int, default=100)
+    parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--load_from_checkpoint', action='store_true')
+    parser.add_argument('--version', type=int, default=0, help='Version of model, if training is resumed from checkpoint')
+    parser.add_argument('--progbar_rate', type=int, default=1, help='How often to update the progress bar in the command line interface')
+    parser.add_argument('--embedding_dim', type=int, default=64)
+    parser.add_argument('--codebook_size', type=int, default=512)
+    parser.add_argument('--gumbel', action='store_true')
+    parser.add_argument('--tau', type=float, default=1)
     args = parser.parse_args()
     # -------------------------------------------------------------------------
 
     # make sure that relevant dirs exist
-    run_name = f'VQVAE/{args.env_name}'
+    run_name = f'ActionVQVAE/{args.env_name}'
     log_dir = os.path.join(args.log_dir, run_name)
     os.makedirs(args.log_dir, exist_ok=True)
     print(f'\nSaving logs and model to {log_dir}')
 
     # init model
-    vqvae_args = Namespace(**{
-            'vq_flavor':args.vq_flavor, 
-            'enc_dec_flavor':args.enc_dec_flavor, 
+    vqvae_args = {
+            'input_dim':64,
             'embedding_dim':args.embedding_dim, 
-            'n_hid':args.n_hid, 
-            'num_embeddings':args.num_embeddings,
-            'loss_flavor':args.loss_flavor,
-            'pre_latent_batchnorm':pre_latent_batchnorm
-        })
+            'codebook_size':args.codebook_size,
+            'log_perplexity':args.log_perplexity
+        }
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')
         print(f'\nLoading model from {checkpoint_file}')
-        model = VQVAE.load_from_checkpoint(checkpoint_file, args=vqvae_args)
+        model = ActionVQVAE.load_from_checkpoint(checkpoint_file, **vqvae_args)
     else:
-        model = VQVAE(args = vqvae_args)
+        model = ActionVQVAE(**vqvae_args)
 
     # load data
-    data = datasets.VAEData(args.env_name, args.data_dir)
-    lengths = [len(data)-int(len(data)*args.val_perc), int(len(data)*args.val_perc)]
-    train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size, num_workers=args.num_workers)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers)
-
-    num_batches = len(train_data) // args.batch_size
-    if len(train_data) % args.batch_size != 0:
-        num_batches += 1
-
-    print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
-    print(f'num val samples = {len(val_data)}')
+    data = datasets.ActionVQVAEDataset(args.env_name, args.data_dir, args.batch_size, args.epochs)
+    train_loader = DataLoader(data, num_workers=args.num_workers)
 
     # annealing schedules for lots of constants
     callbacks = []
-    callbacks.append(ModelCheckpoint(monitor='Validation/loss', mode='min', save_last=True))
+    callbacks.append(ModelCheckpoint(monitor='Training/loss', mode='min', save_last=True, every_n_train_steps=args.save_freq))
     # create callbacks to sample reconstructed images
-    callbacks.append(GenerateCallback(dataset=val_data, save_to_disk=False))
     callbacks.append(DecayLR())
     if args.vq_flavor == 'gumbel':
        callbacks.extend([DecayTemperature(), RampBeta()])
-    trainer = pl.Trainer.from_argparse_args(args, callbacks=callbacks, default_root_dir=log_dir, gpus=torch.cuda.device_count())
-
-    trainer.fit(model, train_loader, val_loader)
+    
+    # create trainer instance
+    trainer = pl.Trainer(
+        callbacks=callbacks, 
+        default_root_dir=log_dir, 
+        gpus=torch.cuda.device_count(),
+        max_epochs=args.epochs,
+        accelerator='dp',
+        log_every_n_steps=args.log_freq,
+        progress_bar_refresh_rate=args.progbar_rate
+    )
+    
+    # train model
+    trainer.fit(model, train_loader)
 
 if __name__ == "__main__":
-    cli_main()
+    main()

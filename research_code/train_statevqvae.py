@@ -8,6 +8,32 @@ import argparse
 import os
 from time import time
 
+"""
+These ramps/decays follow DALL-E Appendix A.2 Training https://arxiv.org/abs/2102.12092
+"""
+class DecayTemperature(pl.Callback):
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
+        # The relaxation temperature τ is annealed from 1 to 1/16 over the first 150,000 updates.
+        t = cos_anneal(0, 150000, 1.0, 1.0/16, trainer.global_step)
+        pl_module.quantizer.temperature = t
+
+class RampBeta(pl.Callback):
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
+        # The KL weight β is increased from 0 to 6.6 over the first 5000 updates
+        # "We divide the overall loss by 256 × 256 × 3, so that the weight of the KL term
+        # becomes β/192, where β is the KL weight."
+        # TODO: OpenAI uses 6.6/192 but kinda tricky to do the conversion here... about 5e-4 works for this repo so far... :\
+        t = cos_anneal(0, 5000, 0.0, 5e-4, trainer.global_step)
+        pl_module.quantizer.kld_scale = t
+
+class DecayLR(pl.Callback):
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
+        # The step size is annealed from 1e10−4 to 1.25e10−6 over 1,200,000 updates. I use 3e-4
+        t = cos_anneal(0, 1200000, 3e-4, 1.25e-6, trainer.global_step)
+        for g in pl_module.optimizer.param_groups:
+            g['lr'] = t
+            
+            
 def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_dir, num_workers, load_from_checkpoint, version, num_trajs, embedding_dim, codebook_size, gumbel, tau):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -49,6 +75,10 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     '''
     
     callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
+    # TODO add callbacks for LR decay and beta ramp
+    callbacks.append(DecayLR())
+    if args.vq_flavor == 'gumbel':
+       callbacks.extend([DecayTemperature(), RampBeta()])
     
     trainer = pl.Trainer(
         progress_bar_refresh_rate=1,
@@ -61,7 +91,8 @@ def main(framevqvae, env_name, data_dir, batch_size, lr, epochs, save_freq, log_
     )
     
     trainer.fit(model, train_loader)
-    
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

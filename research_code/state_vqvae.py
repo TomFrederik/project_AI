@@ -276,68 +276,6 @@ class StateVQVAE(pl.LightningModule):
             params += list(m.parameters())
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
         return optimizer
-    
-    def find_data_mean_var(self, dataloader=None, load_from=None, save_to="./stats.json"):
-        if load_from is None:
-            if dataloader is None:
-                raise ValueError('Need to specify either dataloader or file to load stats from')
-            encoded_povs = []
-            for batch_id, batch in enumerate(dataloader):
-                print(f'{batch_id = }')
-                pov_obs = batch[0]
-                encoded_povs.append(self._apply_frame_encoding(pov_obs.to(self.device)).to('cpu')[0])
-                print(f'{encoded_povs[-1].shape = }')
-            encoded_povs = einops.rearrange(torch.cat(encoded_povs, dim=0), 'b c h w -> (b c h w)')
-            self.data_mean = encoded_povs.mean().item()
-            self.data_var = encoded_povs.var().item()
-            self.data_max = encoded_povs.max().item()
-
-            with open(save_to, 'w') as f:
-                json.dumps(dict(mean=self.data_mean, var=self.data_var, max=self.data_max))
-        else:
-            with open(load_from) as f:
-                stats = json.load(f)
-            self.data_mean = stats['mean']
-            self.data_var = stats['var']
-            self.data_max = stats['max']
-
-        print(f'\n{self.data_mean = }')
-        print(f'{self.data_var = }')
-        print(f'{self.data_max = }\n')
-        
-class CNNEncoder(nn.Module):
-    def __init__(self, num_input_channels):
-        super().__init__()
-        self.conv_net = nn.Sequential(
-            nn.Conv2d(in_channels=num_input_channels, out_channels=256, kernel_size=3, padding=1, stride=2), # input shape is (16,16)
-            #nn.AdaptiveAvgPool2d(output_size=(8,8)),
-            nn.GELU(),
-            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2),
-            #nn.AdaptiveAvgPool2d(output_size=(4,4)),
-            nn.GELU(),
-            nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=3, padding=1, stride=2),
-            #nn.AdaptiveAvgPool2d(output_size=(2,2)),
-            nn.GELU(),
-            nn.Conv2d(in_channels=1024, out_channels=1920, kernel_size=3, padding=1, stride=2),
-            #nn.AdaptiveAvgPool2d(output_size=(1,1))
-        )
-    def forward(self, x):
-        return self.conv_net(x)
-
-class CNNDecoder(nn.Module):
-    def __init__(self, num_output_channels):
-        super().__init__()
-        self.conv_net = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=2048, out_channels=1024, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=1024, out_channels=512, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=512, out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 4 -> 8
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=256, out_channels=num_output_channels, kernel_size=3, padding=1, stride=2, output_padding=1) # 8 -> 16
-        )
-    def forward(self, x):
-        return self.conv_net(x)
 
 class LSTMEncoder(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -367,7 +305,8 @@ class LSTMDecoder(nn.Module):
         else:
             output, (last_hidden, last_cell) = self.lstm(x, (h_0, c_0))
         return output, (last_hidden, last_cell)
-    
+
+
 class StateQuantizer(nn.Module):
     def __init__(self, codebook_size, embedding_dim):
         super().__init__()
