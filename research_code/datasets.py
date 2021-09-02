@@ -498,7 +498,7 @@ class StateVQVAEData(Dataset):
         return self._load_trajectory(self.names[idx])
 
 
-class ActionVQVAEDataset(IterableDataset):
+class BufferedBatchDataset(IterableDataset):
     '''
     For docs on BufferedBatchIter, see https://github.com/minerllabs/minerl/blob/dev/minerl/data/buffered_batch_iter.py
     '''

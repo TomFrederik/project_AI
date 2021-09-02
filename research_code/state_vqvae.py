@@ -9,7 +9,8 @@ import json
 
 from vqvae import VQVAE
 from vqvae_model.deepmind_enc_dec import DeepMindDecoder, DeepMindEncoder
-
+from action_vqvae import ActionVQVAE
+from vecobs_vqvae import VecObsVQVAE
 from scipy.cluster.vq import kmeans2
 
 
@@ -25,7 +26,12 @@ class StateVQVAE(pl.LightningModule):
         lstm_enc_input_size=1024, 
         lstm_dec_hidden_size=1024, 
         latent_size=32,
-        tau=1
+        tau=1,
+        action_quantizer=None,
+        vecobs_quantizer=None,
+        discard_priors=False,
+        perplexity_freq=1,
+        log_perplexity=True
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -34,6 +40,25 @@ class StateVQVAE(pl.LightningModule):
         # load vqvae model
         self.vqvae = VQVAE.load_from_checkpoint(framevqvae)
         self.vqvae.eval()
+
+        # load action quantizer
+        if action_quantizer is None:
+            self.action_quantizer = lambda x: x
+            self.action_dim = 64
+        else:
+            self.action_quantizer = ActionVQVAE.load_from_checkpoint(action_quantizer)
+            self.action_quantizer.eval()
+            self.action_dim = self.action_quantizer.quantizer.embedding_dim
+
+        # load vec obs quantizer
+        if vecobs_quantizer is None:
+            self.vecobs_quantizer = lambda x: x
+            self.vecobs_dim = 64
+        else:
+            self.vecobs_quantizer = VecObsVQVAE.load_from_checkpoint(vecobs_quantizer)
+            self.vecobs_quantizer.eval()
+            self.vecobs_dim = self.vecobs_quantizer.quantizer.embedding_dim
+
         
         self.encoding_batch_size = 300
         self.max_seq_len = 100
@@ -47,10 +72,10 @@ class StateVQVAE(pl.LightningModule):
         self.cnn_encoded = self.cnn_encoder(dummy)
         cnn_encoded_flat_dim = self.cnn_encoded.shape[1]*self.cnn_encoded.shape[2]*self.cnn_encoded.shape[3]
 
-        self.first_projection = nn.Linear(cnn_encoded_flat_dim, lstm_enc_input_size-128)
-        print(f'First: {cnn_encoded_flat_dim} -> {lstm_enc_input_size-128}')
-        self.lstm_starting_state_projection = nn.Linear(lstm_enc_input_size-64, lstm_enc_hidden_size)
-        print(f'lstm starting proj: {lstm_enc_input_size-128} -> {lstm_enc_hidden_size}')
+        self.first_projection = nn.Linear(cnn_encoded_flat_dim, lstm_enc_input_size-self.vecobs_dim-self.action_dim)
+        print(f'First: {cnn_encoded_flat_dim} -> {lstm_enc_input_size-self.vecobs_dim-self.action_dim}')
+        self.lstm_starting_state_projection = nn.Linear(lstm_enc_input_size-self.action_dim, lstm_enc_hidden_size)
+        print(f'lstm starting proj: {lstm_enc_input_size-self.vecobs_dim-self.action_dim} -> {lstm_enc_hidden_size}')
 
         self.lstm_encoder = LSTMEncoder(input_size=self.hparams.lstm_enc_input_size, hidden_size=self.hparams.lstm_enc_hidden_size)
         
@@ -64,7 +89,7 @@ class StateVQVAE(pl.LightningModule):
         self.second_projection = nn.Linear(lstm_enc_hidden_size, self.quantizer_dim*latent_size)
         print(f'Second: {lstm_enc_hidden_size} -> {self.quantizer_dim*latent_size}')
         
-        self.lstm_decoder = LSTMDecoder(input_size=embedding_dim*latent_size + cnn_encoded_flat_dim + 128, hidden_size=lstm_dec_hidden_size)
+        self.lstm_decoder = LSTMDecoder(input_size=embedding_dim*latent_size + cnn_encoded_flat_dim + self.vecobs_dim + self.action_dim, hidden_size=lstm_dec_hidden_size)
 
         self.third_projection = nn.Linear(lstm_dec_hidden_size, cnn_encoded_flat_dim)
         print(f'Third: {lstm_dec_hidden_size} -> {cnn_encoded_flat_dim}')
@@ -87,6 +112,15 @@ class StateVQVAE(pl.LightningModule):
         return nn.CrossEntropyLoss()(predictions, targets)
         #return ((predictions - targets) ** 2).mean() / (2 * self.data_var)
     
+    @torch.no_grad()
+    def _compute_perplexity(self, ind):
+        # debugging: cluster perplexity. when perplexity == num_embeddings then all clusters are used exactly equally
+        encodings = einops.rearrange(F.one_hot(ind, self.quantizer.codebook_size).float(), 'b n c -> (b n) c')
+        avg_probs = encodings.mean(0)
+        perplexity = (-(avg_probs * torch.log(avg_probs + 1e-10)).sum()).exp()
+        cluster_use = torch.sum(avg_probs > 0)
+        return perplexity, cluster_use
+
     def _apply_frame_encoding(self, pov_obs):
         # encode pov obs
         t = pov_obs.shape[1]
@@ -117,7 +151,7 @@ class StateVQVAE(pl.LightningModule):
         quantizer_input = self.second_projection(einops.rearrange(enc_hidden_state_seq, 'b t d -> (b t) d'))
         #print(f'post second proj: {quantizer_input.shape}')
         quantizer_input = einops.rearrange(quantizer_input, 'bt (latent_size quantizer_dim) -> bt latent_size quantizer_dim', latent_size=self.hparams.latent_size, quantizer_dim=self.quantizer_dim)
-        discrete_embeddings, latent_loss = self.quantizer(quantizer_input)
+        discrete_embeddings, latent_loss, ind = self.quantizer(quantizer_input)
         # prepare decoder input
         dec_lstm_input = torch.cat(
             [
@@ -146,7 +180,7 @@ class StateVQVAE(pl.LightningModule):
             t=T
         )
         
-        return predictions, latent_loss, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
+        return predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
 
     def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
         if max_seq_len is None:
@@ -154,11 +188,13 @@ class StateVQVAE(pl.LightningModule):
         # apply frame vqvae
         pov_obs, frame_quantization_idcs, neg_dist = self._apply_frame_encoding(pov_obs)
         assert pov_obs.shape[-2:] == torch.Size([16,16]), f"Expected pov_obs.shape to end with (16,16) but got {pov_obs.shape}"
-        # pov_obs.shape = [B, T, 32,16,16]
-        # normalize and center
-        #pov_obs -= self.data_mean
-        #pov_obs /= self.data_var ** 0.5
         
+        # apply action vqvae. If it was None, then this is the identity mapping
+        actions = self.action_quantizer(actions)
+
+        # apply vec obs vqvae. If it was None, then this is the identity mapping
+        vec_obs = self.vecobs_quantizer(vec_obs)
+
         B, T, C, H, W = pov_obs.shape
         #print('B, T, C, H, W = ', B, T, C, H, W)
         
@@ -183,7 +219,7 @@ class StateVQVAE(pl.LightningModule):
             
             # make predictions for first subsequence
             # save last states of lstms for subsequent subsequences
-            predictions, latent_loss, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence( 
+            predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence( 
                 enc_lstm_input[:,:max_seq_len],
                 dec_lstm_input[:,:max_seq_len], 
                 enc_first_hidden
@@ -194,12 +230,13 @@ class StateVQVAE(pl.LightningModule):
             
             all_predictions = [predictions]
             all_latent_losses = [latent_loss]
+            all_ind = [ind]
             for i in range((pov_obs.shape[1]-2) // max_seq_len - 1):
                 #print(f'{i = }')
                 start_idx = (i+1)*max_seq_len
                 end_idx = (i+2)*max_seq_len
 
-                predictions, latent_loss, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence(
+                predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence(
                     enc_lstm_input[:,start_idx:end_idx], 
                     dec_lstm_input[:,start_idx:end_idx],
                     enc_last_hidden.detach(), 
@@ -210,10 +247,11 @@ class StateVQVAE(pl.LightningModule):
                 
                 all_predictions.append(predictions)
                 all_latent_losses.append(latent_loss)
+                all_ind.append(ind)
 
             # predict remaining frames
             remaining_idx = (pov_obs.shape[1]-2) // max_seq_len * max_seq_len
-            predictions, latent_loss, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence(
+            predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence(
                 enc_lstm_input[:,remaining_idx:], 
                 dec_lstm_input[:,remaining_idx:],
                 enc_last_hidden.detach(), 
@@ -223,8 +261,10 @@ class StateVQVAE(pl.LightningModule):
             )
             all_predictions.append(predictions)
             all_latent_losses.append(latent_loss)
+            all_ind.append(ind)
             
             predictions = torch.cat(all_predictions, dim=1)
+            ind = torch.cat(all_ind, dim=0)
             #print(f'{predictions.shape=}')
             
             latent_loss = torch.sum(torch.tensor(all_latent_losses, device=self.device))
@@ -235,12 +275,14 @@ class StateVQVAE(pl.LightningModule):
         
         # predictions.shape = [B, T-1, 32, 16, 16]
         # compute log_priors
-        #TODO: Deal with memory leak
-        log_prior = self._compute_log_prior(neg_dist)
-        predictions += log_prior
+        if not self.hparams.discard_priors:
+            log_prior = self._compute_log_prior(neg_dist)
+            predictions += log_prior
+        else:
+            pass
 
         #return predictions, pov_obs[:,1:], latent_loss
-        return predictions, frame_quantization_idcs[1:], latent_loss
+        return predictions, frame_quantization_idcs[1:], latent_loss, ind
         
     def _compute_log_prior(self, neg_dist, batch_size=5000):
         B, T, C, H, W = neg_dist.shape
@@ -256,7 +298,7 @@ class StateVQVAE(pl.LightningModule):
         pov_obs, vec_obs, actions = batch
         
         # make predictions
-        predictions, targets, latent_loss = self(pov_obs, vec_obs, actions)
+        predictions, targets, latent_loss, ind = self(pov_obs, vec_obs, actions)
         
         # compute loss
         reconstruction_loss = self.loss_fn(einops.rearrange(predictions, 'b t c h w -> (b t) c h w'), targets)
@@ -267,15 +309,21 @@ class StateVQVAE(pl.LightningModule):
         self.log('Training/loss', loss, on_step=True)
         self.log('Training/reconstruction_loss', reconstruction_loss, on_step=True)
         self.log('Training/latent_loss', latent_loss, on_step=True)
-        
+        if self.hparams.log_perplexity:
+            if (self.global_step + 1) % self.hparams.perplexity_freq == 0:
+                self.eval()
+                perplexity, cluster_use = self._compute_perplexity(ind)
+                self.train()
+                self.log('Training/perplexity', perplexity, prog_bar=True)
+                self.log('Training/cluster_use', cluster_use, prog_bar=True)
         return loss
     
     def configure_optimizers(self):
         params = []
         for m in self.model_list:
             params += list(m.parameters())
-        optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
-        return optimizer
+        self.optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
+        return self.optimizer
 
 class LSTMEncoder(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -424,4 +472,4 @@ class StateGumbelQuantizer(nn.Module):
         qy = F.softmax(z, dim=2)
         latent_loss = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=2).mean()
         ind = soft_one_hot.argmax(dim=2)
-        return z_q, latent_loss#, ind
+        return z_q, latent_loss, ind

@@ -62,7 +62,7 @@ class ActionGumbelQuantizer(nn.Module):
         return z_q, latent_loss, ind
 
 
-class ActionVQVAE(pl.LightningModule):
+class VecObsVQVAE(pl.LightningModule):
 
     def __init__(self, input_dim, codebook_size, embedding_dim, log_perplexity, perplexity_freq):
         super().__init__()
@@ -131,10 +131,10 @@ class ActionVQVAE(pl.LightningModule):
         return z_q, diff, ind, log_priors
     
     def training_step(self, batch, batch_idx):
-        _, action, *_ = batch
-        action = action['vector'].float()
-        prediction, latent_loss, ind = self.forward(action)
-        recon_loss = self.recon_loss(prediction, action)
+        obs, *_ = batch
+        obs = obs['vector'].float()
+        prediction, latent_loss, ind = self.forward(obs)
+        recon_loss = self.recon_loss(prediction, obs)
         loss = recon_loss + latent_loss
         self.log('Training/loss', loss, on_step=True)
         self.log('Training/reconstruction_loss', recon_loss, on_step=True)
@@ -203,7 +203,7 @@ def main():
     # -------------------------------------------------------------------------
     # arguments...
     parser = ArgumentParser()
-    parser.add_argument('--env_name', type=str, default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--env_name', type=str, default='MineRLObtainIronPickaxeVectorObf-v0') # Treechop only has one kind of vecobs
     parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--log_freq', type=int, default=10, help='How often to save values to the logger')
@@ -226,7 +226,7 @@ def main():
     # -------------------------------------------------------------------------
 
     # make sure that relevant dirs exist
-    run_name = f'ActionVQVAE/{args.env_name}'
+    run_name = f'VecObsVQVAE/{args.env_name}'
     log_dir = os.path.join(args.log_dir, run_name)
     os.makedirs(args.log_dir, exist_ok=True)
     print(f'\nSaving logs and model to {log_dir}')
@@ -242,9 +242,9 @@ def main():
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')
         print(f'\nLoading model from {checkpoint_file}')
-        model = ActionVQVAE.load_from_checkpoint(checkpoint_file, **vqvae_args)
+        model = VecObsVQVAE.load_from_checkpoint(checkpoint_file, **vqvae_args)
     else:
-        model = ActionVQVAE(**vqvae_args)
+        model = VecObsVQVAE(**vqvae_args)
 
     # load data
     data = datasets.BufferedBatchDataset(args.env_name, args.data_dir, args.batch_size, args.epochs)
