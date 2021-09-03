@@ -22,20 +22,24 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from vqvae_model.loss import Normal, LogitLaplace
 
 import datasets
+
+import einops 
+
 torch.backends.cudnn.benchmark = True
 
 # -----------------------------------------------------------------------------
-class ActionGumbelQuantizer(nn.Module):
+class VecObsGumbelQuantizer(nn.Module):
     """
     Gumbel Softmax trick quantizer
     Categorical Reparameterization with Gumbel-Softmax, Jang et al. 2016
     https://arxiv.org/abs/1611.01144
     """
-    def __init__(self, codebook_size, embedding_dim, straight_through=False):
+    def __init__(self, codebook_size, embedding_dim, latent_size, straight_through=False):
         super().__init__()
 
         self.embedding_dim = embedding_dim
         self.codebook_size = codebook_size
+        self.latent_size = latent_size
 
         self.straight_through = straight_through
         self.temperature = 1.0
@@ -44,10 +48,11 @@ class ActionGumbelQuantizer(nn.Module):
         self.embedding = nn.Embedding(codebook_size, embedding_dim)
 
     def forward(self, z):
+        z = einops.rearrange(z, 'b (codebook latent_size) -> b latent_size codebook', codebook=self.codebook_size)
 
         # force hard = True when we are in eval mode, as we must quantize
         hard = self.straight_through if self.training else True
-        soft_one_hot = F.gumbel_softmax(z, tau=self.temperature, dim=1, hard=hard)
+        soft_one_hot = F.gumbel_softmax(z, tau=self.temperature, dim=2, hard=hard)
         #print(f'{z.shape = }')
         #print(f'{soft_one_hot.shape = }')
         #print(f'{self.embedding.weight.shape = }')
@@ -56,46 +61,49 @@ class ActionGumbelQuantizer(nn.Module):
         #print(f'{z_q.shape = }')
 
         # + kl divergence to the prior loss
-        qy = F.softmax(z, dim=1)
-        latent_loss = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=1).mean()
-        ind = soft_one_hot.argmax(dim=1)
+        qy = F.softmax(z, dim=2)
+        latent_loss = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=2).mean()
+        ind = soft_one_hot.argmax(dim=2)
+        z_q = einops.rearrange(z_q, 'b l e -> b (l e)')
+        ind = einops.rearrange(ind, 'b l -> (b l)')
+
         return z_q, latent_loss, ind
 
 
 class VecObsVQVAE(pl.LightningModule):
 
-    def __init__(self, input_dim, codebook_size, embedding_dim, log_perplexity, perplexity_freq):
+    def __init__(self, input_dim, codebook_size, embedding_dim, log_perplexity, perplexity_freq, latent_size, num_hidden):
         super().__init__()
         self.save_hyperparameters()
 
         # encoder/decoder module pair
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 1024),
+            nn.Linear(input_dim, num_hidden),
             nn.GELU(),
-            nn.Linear(1024, 512),
+            nn.Linear(num_hidden, num_hidden),
             nn.GELU(),
-            nn.Linear(512, 256),
+            nn.Linear(num_hidden, num_hidden),
             nn.GELU(),
-            nn.Linear(256, 128),
+            nn.Linear(num_hidden, num_hidden),
             nn.GELU(),
-            nn.Linear(128, codebook_size)
+            nn.Linear(num_hidden, codebook_size*latent_size)
         )
 
         self.decoder = nn.Sequential(
-            nn.Linear(embedding_dim, 128),
+            nn.Linear(embedding_dim*latent_size, num_hidden),
             nn.GELU(),
-            nn.Linear(128, 256),
+            nn.Linear(num_hidden, num_hidden),
             nn.GELU(),
-            nn.Linear(256, 512),
+            nn.Linear(num_hidden, num_hidden),
             nn.GELU(),
-            nn.Linear(512, 1024),
+            nn.Linear(num_hidden, num_hidden),
             nn.GELU(),
-            nn.Linear(1024, input_dim),
+            nn.Linear(num_hidden, input_dim),
             nn.Tanh() # action space is roughly boxed in [-1, 1]
         ) 
 
         # the quantizer module sandwiched between them, +contributes a KL(posterior || prior) loss to ELBO
-        self.quantizer = ActionGumbelQuantizer(codebook_size, embedding_dim)
+        self.quantizer = VecObsGumbelQuantizer(codebook_size, embedding_dim, latent_size)
 
         # the data reconstruction loss in the ELBO
         self.recon_loss = nn.MSELoss()
@@ -122,17 +130,17 @@ class VecObsVQVAE(pl.LightningModule):
     @torch.no_grad()
     def encode_only(self, x):
         z = self.encoder(x)
-        z_q, _, ind, log_priors = self.quantizer(z)
-        return z_q, ind, log_priors
+        z_q, _, ind = self.quantizer(z)
+        return z_q, ind
     
     def encode_with_grad(self, x):
         z = self.encoder(x)
-        z_q, diff, ind, log_priors = self.quantizer(z)
-        return z_q, diff, ind, log_priors
+        z_q, diff, ind = self.quantizer(z)
+        return z_q, diff, ind
     
     def training_step(self, batch, batch_idx):
         obs, *_ = batch
-        obs = obs['vector'].float()
+        obs = obs['vector'].float()[0]
         prediction, latent_loss, ind = self.forward(obs)
         recon_loss = self.recon_loss(prediction, obs)
         loss = recon_loss + latent_loss
@@ -219,9 +227,10 @@ def main():
     parser.add_argument('--version', type=int, default=0, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--progbar_rate', type=int, default=1, help='How often to update the progress bar in the command line interface')
     parser.add_argument('--embedding_dim', type=int, default=64)
+    parser.add_argument('--latent_size', type=int, default=32)
+    parser.add_argument('--num_hidden', type=int, default=512)
     parser.add_argument('--codebook_size', type=int, default=512)
     parser.add_argument('--gumbel', action='store_true')
-    parser.add_argument('--tau', type=float, default=1)
     args = parser.parse_args()
     # -------------------------------------------------------------------------
 
@@ -237,7 +246,9 @@ def main():
             'embedding_dim':args.embedding_dim, 
             'codebook_size':args.codebook_size,
             'log_perplexity':args.log_perplexity,
-            'perplexity_freq':args.perplexity_freq
+            'perplexity_freq':args.perplexity_freq,
+            'latent_size':args.latent_size,
+            'num_hidden':args.num_hidden
         }
     if args.load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{args.version}', 'checkpoints', 'last.ckpt')

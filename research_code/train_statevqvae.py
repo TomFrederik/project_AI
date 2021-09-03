@@ -76,15 +76,17 @@ def main(
     lr_decay_max_time,
     ramp_beta_max_time,
     temp_decay_max_time,
-    discard_priors
+    discard_priors,
+    lstm_enc_input_size,
+    max_seq_len
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # get full paths for quantizers
     if action_quantizer is not None:
-        action_quantizer = os.path.join(log_dir, 'ActionVQVAE', 'lightning_logs', f'version_{action_quantizer}', 'checkpoints', 'last.ckpt')
+        action_quantizer = os.path.join(log_dir, 'ActionVQVAE', f'{env_name}', 'lightning_logs', f'version_{action_quantizer}', 'checkpoints', 'last.ckpt')
     if vecobs_quantizer is not None:
-        vecobs_quantizer = os.path.join(log_dir, 'VecObsVQVAE', 'lightning_logs', f'version_{vecobs_quantizer}', 'checkpoints', 'last.ckpt')
+        vecobs_quantizer = os.path.join(log_dir, 'VecObsVQVAE', f'{env_name}', 'lightning_logs', f'version_{vecobs_quantizer}', 'checkpoints', 'last.ckpt')
     
     # make sure that relevant dirs exist
     run_name = f'StateVQVAE/{env_name}'
@@ -108,7 +110,9 @@ def main(
         'tau':tau,
         'action_quantizer':action_quantizer,
         'vecobs_quantizer':vecobs_quantizer,
-        'discard_priors':discard_priors
+        'discard_priors':discard_priors,
+        "lstm_enc_input_size":lstm_enc_input_size,
+        "max_seq_len":max_seq_len
     }
     if load_from_checkpoint:
         checkpoint_file = os.path.join(log_dir, 'lightning_logs', f'version_{version}', 'checkpoints', 'last.ckpt')
@@ -164,6 +168,8 @@ if __name__ == '__main__':
     parser.add_argument('--version', type=int, default=0, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--embedding_dim', type=int, default=64)
     parser.add_argument('--codebook_size', type=int, default=32)
+    parser.add_argument('--max_seq_len', type=int, default=100)
+    parser.add_argument('--lstm_enc_input_size', type=int, default=1024)
     parser.add_argument('--gumbel', action='store_true')
     parser.add_argument('--tau', type=float, default=1)
     parser.add_argument('--lr_decay_max_time', type=int, default=1200000)

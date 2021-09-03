@@ -3,65 +3,65 @@ import argparse
 import os
 import minerl
 import torch
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 
 def main(
     env_name,
-    data_dir,
-    log_dir,
-    action_quantizer,
-    batch_size,
-    num_trajs
+    save_dir,
+    action_quantizer
 ):
-    
-# set device
-device = 'cuda' if torch.cuda.is_available() else 'cpu'    
 
-# load model
-model_path = os.path.join(log_dir, 'ActionVQVAE', env_name, 'lightning_logs', 'version_'+str(action_quantizer), 'checkpoints', 'last.ckpt')
-model: ActionVQVAE = ActionVQVAE.load_from_checkpoint(model_path).to(device)  
-model.eval()
+    # set data path
+    data_path = os.path.join(save_dir, env_name, f'actions_version_{action_quantizer}.npz')
 
+    # load data
+    data = np.load(data_path)
+    deobf_data = data['unique_deobf']
+    obf_data = data['all_obf']
 
-# set up data pipelines
-obf_env_name = env_name + 'VectorObf-v0'
-deobf_env_name = env_name + '-v0'
+    # 
+    unique_quantized = pd.DataFrame(obf_data).drop_duplicates().to_numpy()
 
-obf_pipeline = minerl.data.make(obf_env_name)
-deobf_pipeline = minerl.data.make(deobf_env_name)
-names = pipeline.get_trajectory_names()
+    # check if there is at least one collision
+    if len(deobf_data) == len(unique_quantized):
+        print("\n'deobf_data' and 'unqiue_quantized' have the same number of elements!")
+        print('That means there is no possible collision!')
+        print('Terminating early, without plotting...')
+        return
+    else:
+        print(f'Number of unique actions = {len(deobf_data)}')
+        print(f'Number of unique clusters = {len(unique_quantized)}')
 
-#
-unique_actions = {}
+    # for every unique quantized action, find all deobf actions which get mapped to that quantized action
+    cluster_id_to_deobf = {}
+    for i in tqdm(range(len(unique_quantized))):
+        cluster_id_to_deobf[i] = deobf_data[(obf_data == unique_quantized[i]).all(axis=1)]
+        #print(np.std(cluster_id_to_deobf[i], axis=0))
+        #print(cluster_id_to_deobf[i])
+        #fig = plt.figure(figsize=(6,100))
+        #print(np.min(1 + np.abs(np.min(cluster_id_to_deobf[i])) + cluster_id_to_deobf[i]))
+        #plt.imshow(np.log(1 + np.abs(np.min(cluster_id_to_deobf[i])) + cluster_id_to_deobf[i]), cmap='viridis', interpolation='nearest')
+        #plt.savefig(os.path.join(save_dir, env_name, f'cluster_0_version_{action_quantizer}.png'))
+        #raise ValueError
+    #print(cluster_id_to_deobf)
 
-
-# iterate over all trajectories
-for name in names:
-    # load trajectory
-    obf_traj = obf_pipeline.load_data(name)
-    deobf_traj = deobf_pipeline.load_data(name)
-
-    # get actions
-    _, obf_actions, *_ = zip(obf_traj)
-    _, deobf_actions, *_ = zip(deobf_traj)
-    print(deobf_actions)
-    obf_actions = np.array([ac['vector'] for ac in obf_actions])
-    obf_actions = torch.from_numpy(obf_actions.astype(np.float32)).to(device)
-    print(f'{obf_actions.shape = }')
-    
-    # compute quantized actions
-    quantized_actions, *_ = model.encode_only(obf_actions)
-    print(f'{quantized_actions.shape = }')
-
-    raise ValueError
+    # plot number of collisions
+    num_collisions = [v.shape[0] for v in cluster_id_to_deobf.values()]
+    fig = plt.figure()
+    plt.bar(np.arange(len(num_collisions)), num_collisions)
+    plt.ylabel('Collisions')
+    plt.xlabel('Action ID')
+    plt.savefig(os.path.join(save_dir, env_name, f'collisions_version_{action_quantizer}.png'))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env_name', type=str, default='MineRLTreechop')
-    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
-    parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
-    parser.add_argument('--action_quantizer', type=int, default=None, help='Version of the ActionVQVAE to use')
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--num_trajs', type=int, default=0)
+    parser.add_argument('--env_name', type=str, default='MineRLTreechop-v0')
+    parser.add_argument('--save_dir', type=str, default='/home/lieberummaas/datadisk/minerl/action_analysis')
+    parser.add_argument('--action_quantizer', type=int, default=0)
     
     args = parser.parse_args()
     
