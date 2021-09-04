@@ -80,6 +80,8 @@ def main(
     lstm_enc_input_size,
     max_seq_len
 ):
+    pl.seed_everything(1337)
+    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # get full paths for quantizers

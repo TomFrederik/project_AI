@@ -61,9 +61,9 @@ class StateVQVAE(pl.LightningModule):
             self.vecobs_quantizer.eval()
             self.vecobs_dim = self.vecobs_quantizer.quantizer.embedding_dim * self.vecobs_quantizer.quantizer.latent_size
 
-        print(f'{lstm_enc_input_size = }')
+        print(f'\n{lstm_enc_input_size = }')
         print(f'{self.vecobs_dim = }')
-        print(f'{self.action_dim = }')
+        print(f'{self.action_dim = }\n')
         if lstm_enc_input_size <= self.vecobs_dim + self.action_dim:
             raise ValueError(f"lstm_enc_input_size <= self.vecobs_dim + self.action_dim: {lstm_enc_input_size} <= {self.vecobs_dim} + {self.action_dim}")
         elif lstm_enc_input_size <= + self.action_dim:
@@ -98,7 +98,7 @@ class StateVQVAE(pl.LightningModule):
         self.lstm_decoder = LSTMDecoder(input_size=embedding_dim*latent_size + cnn_encoded_flat_dim + self.vecobs_dim + self.action_dim, hidden_size=lstm_dec_hidden_size)
 
         self.third_projection = nn.Linear(lstm_dec_hidden_size, cnn_encoded_flat_dim)
-        print(f'Third: {lstm_dec_hidden_size} -> {cnn_encoded_flat_dim}')
+        print(f'Third: {lstm_dec_hidden_size} -> {cnn_encoded_flat_dim}\n')
 
         self.cnn_decoder = DeepMindDecoder(n_init=self.cnn_encoded.shape[1], n_hid=64, output_channels=self.vqvae.hparams.args.num_embeddings)#num_input_channels)
         
@@ -148,6 +148,15 @@ class StateVQVAE(pl.LightningModule):
         
         return enc_pov_obs, frame_quantization_idcs, all_neg_dist
 
+    def _compute_log_prior(self, neg_dist):
+        B, T, C, H, W = neg_dist.shape
+        log_prior = []
+        neg_dist = einops.rearrange(neg_dist, 'b t c h w -> (b t h w) c')
+        log_prior.append(nn.functional.log_softmax(neg_dist / self.hparams.tau, dim=1))
+
+        log_prior = einops.rearrange(torch.cat(log_prior, dim=0), '(b t h w) c -> b t c h w', b=B, t=T, c=C, h=H, w=W)
+        return log_prior
+        
     def _predict_subsequence(self, enc_lstm_input, dec_lstm_input, enc_first_hidden, enc_first_cell=None, dec_first_hidden=None, dec_first_cell=None):
 
         # encode with lstm
@@ -171,6 +180,7 @@ class StateVQVAE(pl.LightningModule):
         )
         
         # decode with lstm
+        #print(f'{dec_lstm_input.shape = }')
         dec_hidden_state_seq, (dec_last_hidden, dec_last_cell) = self.lstm_decoder(dec_lstm_input, dec_first_hidden, dec_first_cell)
 
         # prepare cnn decoder input
@@ -180,11 +190,113 @@ class StateVQVAE(pl.LightningModule):
         # decode with cnn decoder
         # decode in batches because otherwise out of memory
         predictions = []
-        for i in range(len(cnn_decoder_input)//self.encoding_batch_size + 1):
+        for i in range((len(cnn_decoder_input) - 1) // self.encoding_batch_size + 1):
             predictions.append(self.cnn_decoder(cnn_decoder_input[i*self.encoding_batch_size:(i+1)*self.encoding_batch_size]))
         predictions = einops.rearrange(torch.cat(predictions, dim=0), '(b t) c h w -> b t c h w', t=T)
         
         return predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
+
+    def _process_subsequence(
+        self, 
+        pov_obs, 
+        vec_obs, 
+        actions, 
+        enc_lstm_input, 
+        dec_lstm_input, 
+        enc_first_hidden, 
+        enc_first_cell=None, 
+        dec_first_hidden=None, 
+        dec_first_cell=None
+    ):
+        # apply frame vqvae
+        pov_obs, frame_quantization_idcs, neg_dist = self._apply_frame_encoding(pov_obs)
+        assert pov_obs.shape[-2:] == torch.Size([16,16]), f"Expected pov_obs.shape to end with (16,16) but got {pov_obs.shape}"
+
+        # save for future reference  
+        B, T, C, H, W = pov_obs.shape
+
+        # apply quantizers on action and vec_obs
+        if self.action_quantizer is not None:
+            # apply action vqvae
+            actions = einops.rearrange(self.action_quantizer.encode_only(einops.rearrange(actions, 'b t d -> (b t) d'))[0], '(b t) d -> b t d', b=B)
+
+        if self.vecobs_quantizer is not None:
+            # apply vec obs vqvae
+            vec_obs = einops.rearrange(self.vecobs_quantizer.encode_only(einops.rearrange(vec_obs, 'b t d -> (b t) d'))[0], '(b t) d -> b t d', b=B)
+
+        # encode all latent images further with cnn encoder
+        encoded_images = einops.rearrange(self.cnn_encoder(einops.rearrange(pov_obs, 'b t c h w -> (b t) c h w')), 'bt c h w -> bt (c h w)')
+
+        # prepare lstm input
+        dec_lstm_input = torch.cat([einops.rearrange(encoded_images, '(b t) d -> b t d', t=T)[:,:-1], vec_obs[:,:-1], actions[:,:-1]], dim=2)
+        encoded_images = self.first_projection(encoded_images)
+        encoded_images = einops.rearrange(encoded_images, '(b t) d -> b t d', b=B, t=T)
+        enc_first_hidden = self.lstm_starting_state_projection(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
+        #print(f'post lstm starting proj: {enc_first_hidden.shape}')
+        enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2)
+
+        # make predictions
+        predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence( 
+            enc_lstm_input,
+            dec_lstm_input, 
+            enc_first_hidden,
+            enc_first_cell,
+            dec_first_hidden,
+            dec_first_cell
+        )
+
+        # compute priors and update
+        if not self.hparams.discard_priors:
+            log_prior = self._compute_log_prior(neg_dist)
+            predictions += log_prior
+        else:
+            pass
+        
+        # compute loss
+        reconstruction_loss = self.loss_fn(predidtions, frame_quantization_idcs[1:])
+
+        return reconstruction_loss, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
+
+    def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
+        if max_seq_len is None:
+            max_seq_len = self.hparams.max_seq_len
+        
+        # init lstm states
+        enc_last_hidden = None
+        enc_last_cell = None
+        dec_last_hidden = None
+        dec_last_cell = None
+
+        # init loss
+        total_reconstruction_loss = 0
+        total_latent_loss = 0
+        
+        # init index tensor
+        all_ind = []
+
+        for i in range((pov_obs.shape[1] - 1) // max_seq_len + 1):
+            start_idx = i * max_seq_len
+            stop_idx = (i + 1) * max_seq_len
+            reconstruction_loss, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._process_subsequence(
+                pov_obs[:,start_idx:stop_idx],
+                vec_obs[:,start_idx:stop_idx],
+                actions[:,start_idx:stop_idx],
+                enc_lstm_input,#TODO
+                dec_lstm_input,#TODO
+                enc_last_hidden,
+                enc_last_cell,
+                dec_last_hidden,
+                dec_last_cell
+            )
+            
+            # save subsequence outputs
+            total_latent_loss = total_latent_loss + latent_loss
+            total_reconstruction_loss = total_reconstruction_loss + reconstruction_loss
+            all_ind.append(ind)
+        
+        all_ind = torch.cat(all_ind, dim=0)
+
+        return total_reconstruction_loss, total_latent_loss, all_ind
 
     def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
         if max_seq_len is None:
@@ -239,7 +351,6 @@ class StateVQVAE(pl.LightningModule):
             all_latent_losses = [latent_loss]
             all_ind = [ind]
             for i in range((pov_obs.shape[1]-2) // max_seq_len - 1):
-                #print(f'{i = }')
                 start_idx = (i+1)*max_seq_len
                 end_idx = (i+2)*max_seq_len
 
@@ -281,28 +392,16 @@ class StateVQVAE(pl.LightningModule):
             predictions, latent_loss, *_ = self._predict_subsequence(enc_lstm_input, h_0)
         
         # predictions.shape = [B, T-1, 32, 16, 16]
-        # compute log_priors
+        # compute log_priors and update
         if not self.hparams.discard_priors:
             log_prior = self._compute_log_prior(neg_dist)
-            print(log_prior.shape)
             for i in range(len(all_predictions)):
-                print(all_predictions[i].shape)
                 all_predictions[i] += log_prior[:,i*self.hparams.max_seq_len:(i+1)*self.hparams.max_seq_len] 
-            all_predictions += log_prior
         else:
             pass
 
         #return predictions, pov_obs[:,1:], latent_loss
         return all_predictions, frame_quantization_idcs[1:], latent_loss, all_ind
-        
-    def _compute_log_prior(self, neg_dist):
-        B, T, C, H, W = neg_dist.shape
-        neg_dist = einops.rearrange(neg_dist, 'b t c h w -> (b t h w) c')
-        log_prior = []
-        for i in range(len(neg_dist) // self.encoding_batch_size + 1):
-            log_prior.append(nn.functional.log_softmax(neg_dist[i*self.encoding_batch_size:(i+1)*self.encoding_batch_size] / self.hparams.tau, dim=1))
-        log_prior = einops.rearrange(torch.cat(log_prior, dim=0), '(b t h w) c -> b t c h w', b=B, t=T, c=C, h=H, w=W)
-        return log_prior
         
     def training_step(self, batch, batch_idx):
         # unpack batch
@@ -314,8 +413,10 @@ class StateVQVAE(pl.LightningModule):
         # compute loss
         reconstruction_loss = 0
         for i in range(len(predictions)):
-            preds = predictions[i]
+            preds = predictions[i][0]
             targs = targets[i*self.hparams.max_seq_len:(i+1)*self.hparams.max_seq_len]
+            print(f"{preds.shape = }")
+            print(f"{targs.shape = }")
             reconstruction_loss = reconstruction_loss + self.loss_fn(preds, targs)
         loss = reconstruction_loss + latent_loss
         #print(f'attempting backward with sequence of length {pov_obs.shape[1]}...')
