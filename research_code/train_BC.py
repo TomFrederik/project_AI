@@ -1,6 +1,5 @@
-import env_wrappers
 import models
-import datasets
+from datasets import BufferedBatchDataset
 
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -9,11 +8,23 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 import numpy as np
 import argparse
 import os
-from pyvirtualdisplay import Display
-import gym
 
-
-def train_bc(model_path, data_dir, env_name, lr, val_perc, eval_freq, batch_size, epochs, lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, n_clusters, centroids_path):
+def train_bc(
+    model_path, 
+    data_dir, 
+    env_name, 
+    lr, 
+    val_perc, 
+    eval_freq, 
+    batch_size, 
+    epochs, 
+    lr_gamma, 
+    lr_decrease_freq, 
+    log_dir, 
+    lr_step_mode, 
+    n_clusters, 
+    centroids_path
+):
 
     # make sure that relevant dirs exist
     run_name = f'BCLinear/{env_name}'
@@ -71,15 +82,12 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir')
     parser.add_argument('--log_dir')
     parser.add_argument('--env_name')
-    parser.add_argument('--centroids_path', help='Path to file containing action centroids')
-    parser.add_argument('--batch_size', default=2, type=int)
-    parser.add_argument('--epochs', default=1, type=int)
+    parser.add_argument('--batch_size', default=100, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
-    parser.add_argument('--lr_gamma', default=0.5, type=float, help='Learning rate adjustment factor')
-    parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
-    parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
-    parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct a random val image for tensorboard')
+    parser.add_argument('--num_epochs', default=1, type=int)
+    parser.add_argument('--save_freq', default=100, type=int, help='How often to save model')
+    
+    parser.add_argument('--centroids_path', help='Path to file containing action centroids')
     parser.add_argument('--n_clusters', default=200, type=int)
 
     args = vars(parser.parse_args())

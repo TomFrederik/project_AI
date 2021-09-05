@@ -52,7 +52,7 @@ def main(
     # plot number of collisions
     num_collisions = [v.shape[0] for v in cluster_id_to_deobf.values()]
     fig = plt.figure()
-    plt.bar(np.arange(len(num_collisions)), num_collisions)
+    plt.bar(np.arang e(len(num_collisions)), num_collisions)
     plt.ylabel('Collisions')
     plt.xlabel('Action ID')
     plt.savefig(os.path.join(save_dir, env_name, f'collisions_version_{action_quantizer}.png'))
