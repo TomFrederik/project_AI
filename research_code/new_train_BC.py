@@ -16,7 +16,7 @@ def train(
     feature_extractor_class_name,
     feature_extractor_version,
     lr,
-    action_centroids_path, 
+    action_num_centroids, 
     action_vqvae_version, 
     vecobs_vqvae_version,
     hidden_dim,
@@ -24,19 +24,28 @@ def train(
     num_epochs,
     save_freq
 ):
+    # set seed
+    pl.seed_everything(1337)
+
     # get feature extractor class
     feature_extractor_class = {
         'vqvae':VQVAE,
-        'vae':ResnetVAE
+        'vae':ResnetVAE,
+        'conv':None
     }[feature_extractor_class_name]
     
     # get paths
-    feature_extractor_path = os.path.join(log_dir, feature_extractor_class.__name__, env_name, 'lightning_logs', 'version_'+feature_extractor_version, 'checkpoints', 'last.ckpt')
+    if feature_extractor_class is not None:
+        feature_extractor_path = os.path.join(log_dir, feature_extractor_class.__name__, env_name, 'lightning_logs', 'version_'+feature_extractor_version, 'checkpoints', 'last.ckpt')
+    else:
+        feature_extractor_path = None
+    if action_num_centroids is not None:
+        action_centroids_path = os.path.join(data_dir, env_name+'_'+str(action_num_centroids)+'_centroids.npy')
     if action_vqvae_version is not None:
         action_vqvae_path = os.path.join(log_dir, 'ActionVQVAE', env_name, 'lightning_logs', 'version_'+action_vqvae_version, 'checkpoints', 'last.ckpt')
     else:
         action_vqvae_path = None
-    if vecobs_vqvae_path is not None:
+    if vecobs_vqvae_version is not None:
         vecobs_vqvae_path = os.path.join(log_dir, 'VecObsVQVAE', env_name, 'lightning_logs', 'version_'+vecobs_vqvae_version, 'checkpoints', 'last.ckpt')
     else:
         vecobs_vqvae_path = None
@@ -57,7 +66,7 @@ def train(
     dataloader = DataLoader(data, num_workers=1)
     
     # set log dir for trainer
-    default_log_dir = os.path.join(log_dir, 'BC_'+feature_extractor_class_name, env_name)
+    default_log_dir = os.path.join(log_dir, 'BC', env_name, feature_extractor_class_name)
     if action_vqvae_path is None and vecobs_vqvae_path is None:
         default_log_dir = os.path.join(default_log_dir, 'action_centroids_only')
     if action_vqvae_path is not None and vecobs_vqvae_path is None:
@@ -87,12 +96,12 @@ def train(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', type=str, default='MineRLTreechopVectorObf-v0')
-    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerrl/data')
-    parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerrl/run_logs')
-    parser.add_argument('--feature_extractor_class_name', type=str, default='vqvae', choices=['vqvae', 'vae'])
-    parser.add_argument('--feature_extractor_version', type=str, default=0)
+    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
+    parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerl/run_logs')
+    parser.add_argument('--feature_extractor_class_name', type=str, default='vqvae', choices=['vqvae', 'vae', 'conv'])
+    parser.add_argument('--feature_extractor_version', type=str, default='0')
     parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--action_centroids_path', type=str, default=None)
+    parser.add_argument('--action_num_centroids', type=int, default=None)
     parser.add_argument('--action_vqvae_version', type=str, default=None)
     parser.add_argument('--vecobs_vqvae_version', type=str, default=None)
     parser.add_argument('--hidden_dim', type=int, default=1024)
