@@ -22,7 +22,7 @@ STR_TO_CLASS = {'Conv':visual_models.ConvVAE, 'ResNet':visual_models.ResnetVAE}
 
 class GenerateCallback(pl.Callback):
 
-    def __init__(self, batch_size=6, every_n_epochs=1, dataset=None, save_to_disk=False, every_n_batches=100, precision=32):
+    def __init__(self, batch_size=6, every_n_epochs=1, dataset=None, save_to_disk=False, every_n_batches=100):
         """
         Inputs:
             batch_size - Number of images to generate
@@ -40,9 +40,8 @@ class GenerateCallback(pl.Callback):
         #x_samples, x_mean = pl_module.sample(self.batch_size)
         idx = np.random.choice(len(self.dataset), replace=False, size=self.batch_size)
         batch = [self.dataset[i] for i in idx]
-        self.img_batch = torch.stack([b[1] for b in batch], dim=0)
-        if precision == 16:
-            self.img_batch = self.img_batch.half()
+        self.img_batch = self.dataset.iter.buffered_batch_iter(batch_size, num_batches=1)[0]['pov']
+        self.img_batch = einops.rearrange(self.img_batch, 'b h w c -> b c h w').float()/255
 
     def on_epoch_end(self, trainer, pl_module):
         """
@@ -89,10 +88,10 @@ class GenerateCallback(pl.Callback):
         trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
 
 
-def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data, 
+def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, save_freq, batch_size, num_data, 
                 epochs, lr_gamma, lr_decrease_freq, log_dir, model_class, lr_step_mode,
-                latent_dim, beta, num_encoder_channels, val_check_interval, num_layers_per_block,
-                precision, load_from_checkpoint, version_dir, accumulate_grad_batches
+                latent_dim, beta, num_encoder_channels, num_layers_per_block,
+                load_from_checkpoint, version_dir
             ):
     
     # make sure that relevant dirs exist
@@ -145,49 +144,33 @@ def train_VAE(env_name, data_dir, lr, val_perc, eval_freq, batch_size, num_data,
     # init model
     if load_from_checkpoint:
         checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
-        
         print(f'\nLoading model from {checkpoint}')
         model = STR_TO_CLASS[model_class].load_from_checkpoint(checkpoint, learning_rate=lr)
         model.scheduler_kwargs['lr_decrease_freq'] = lr_decrease_freq
-        #trainer = Trainer(resume_from_checkpoint = checkpoint)        
-        #print(f'New model lr is {model.lr}')
     else:
         scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
         model = STR_TO_CLASS[model_class](encoder_kwargs, decoder_kwargs, lr, scheduler_kwargs, batch_size, beta)
-        
     
-
     # load data
-    data = datasets.VAEData(env_name, data_dir, num_data)
-    lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
-    train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=6)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=6)
-
-    num_batches = len(train_data) // batch_size
-    if len(train_data) % batch_size != 0:
-        num_batches += 1
-
-    print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
-    print(f'num val samples = {len(val_data)}')
+    train_data = datasets.BufferedBatchDataset(env_name, data_dir, batch_size, epochs)
+    train_loader = DataLoader(train_data, num_workers=1)
 
     # create callbacks to sample reconstructed images and for model checkpointing
-    img_callback =  GenerateCallback(dataset=val_data, save_to_disk=False, precision=precision)
-    checkpoint_callback = ModelCheckpoint(mode="min", monitor="Validation/bpd", save_last=True)
+    img_callback =  GenerateCallback(dataset=train_data, save_to_disk=False)
+    checkpoint_callback = ModelCheckpoint(mode="min", monitor="Train/bpd", save_last=True, every_n_train_steps=save_freq)
     trainer=pl.Trainer(
-                    precision=precision, #32 is normal, 16 is mixed precision. 16 must be set for deepspeed
-                    progress_bar_refresh_rate=100, #every N batches update progress bar
-                    callbacks=[img_callback, checkpoint_callback],
-                    gpus=torch.cuda.device_count(),
-                    #accelerator='ddp', #anything else here seems to lead to crashes/errors
-                    default_root_dir=log_dir,
-                    max_epochs=epochs,
-                    val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
-                    gradient_clip_val=1,
-                    accumulate_grad_batches=accumulate_grad_batches)
+        progress_bar_refresh_rate=100, #every N batches update progress bar
+        callbacks=[img_callback, checkpoint_callback],
+        gpus=torch.cuda.device_count(),
+        #accelerator='ddp', #anything else here seems to lead to crashes/errors
+        default_root_dir=log_dir,
+        max_epochs=epochs,
+        val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
+        gradient_clip_val=1,
+    )
                     
     # fit model
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader)
     
 
 if __name__=='__main__':
@@ -198,7 +181,6 @@ if __name__=='__main__':
     parser.add_argument('--env_name')
     parser.add_argument('--model_class', choices=['Conv','CLSTM', 'ResNet'])
     parser.add_argument('--batch_size', default=2, type=int)
-    parser.add_argument('--num_data', default=0, type=int, help='Number of datapoints to use')
     parser.add_argument('--latent_dim', default=128, type=int)
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--beta', default=1, type=float, help='Beta param for beta-VAE')
@@ -206,12 +188,10 @@ if __name__=='__main__':
     parser.add_argument('--lr_gamma', default=0.5, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
-    parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct a random val image for tensorboard')
+    parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct images for tensorboard')
+    parser.add_argument('--save_freq', default=100, type=int, help='How often to save model')
     parser.add_argument('--num_encoder_channels', default=[32,64,128,256], type=int, nargs='+')
     parser.add_argument('--num_layers_per_block', default=2, type=int, help='Number of layers per Residual Block. Only used in ResNet.')
-    parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
-    parser.add_argument('--precision', default=32, type=int, help='Numerical precision', choices=[16,32])
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
     parser.add_argument('--accumulate_grad_batches', default=1, type=int, help='How many batches to accumulate batches over')
     parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
