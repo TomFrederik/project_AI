@@ -29,9 +29,12 @@ class Counter():
                 self.obs_counter[r].append(ind[i].to('cpu').numpy())
 
     def iter_through_data(self):
-        for batch in tqdm(iter(self.data)):
+        for i, batch in tqdm(enumerate(self.data)):
             self.process_batch(batch)
-            print(self.obs_counter[256])
+            print(self.obs_counter[1024])
+            #if (i+1) % 1 == 0:
+                
+    
 
 def main(
     env_name, 
@@ -57,7 +60,7 @@ if __name__=='__main__':
     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--env_name', default='MineRLObtainIronPickaxeVectorObf-v0')
-    parser.add_argument('--batch_size', default=128, type=int)
+    parser.add_argument('--batch_size', default=20000, type=int)
     parser.add_argument('--quantizer_version', default=None, type=int)
 
     args = vars(parser.parse_args())
