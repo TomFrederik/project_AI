@@ -7,6 +7,7 @@ import numpy as np
 import os
 import random
 import einops
+from random import shuffle
 from itertools import chain
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
@@ -89,7 +90,7 @@ def get_data(env_name, num_samples=0, data_dir=None):
 
 class RewardData(IterableDataset):
 
-    def __init__(self, env_name, data_dir, upsample=False, backfill=False, backfill_discount=0.99):
+    def __init__(self, env_name, data_dir, num_workers=1, upsample=False, backfill=False, backfill_discount=0.99):
         '''
         Dataset to learn to predict reward given vec_obs
         '''
@@ -99,9 +100,9 @@ class RewardData(IterableDataset):
         self.data = minerl.data.make(env_name, data_dir)
         
         self.names = self.data.get_trajectory_names()
-        self.names.shuffle()
-        self.names = iter(self.names)
-        
+        shuffle(self.names)
+        worker_names = [self.names[i:len(self.names)//num_workers*(i+1)] for i in range(num_workers)]
+        self.iter_per_worker = [iter(worker_names[i]) for i in range(num_workers)]
     def backfill(self, rew, starts, gamma):
         for i in range(len(rew)-2, -1, -1):
             if starts[i+1] == 1:
@@ -111,12 +112,15 @@ class RewardData(IterableDataset):
         return rew
 
     def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id
+
         # load traj
-        obs, _, rew, *_ = self.data.load_data(next(self.names))
-        
+        obs, _, rew, *_ = zip(*self.data.load_data(next(self.iter_per_worker[worker_id])))
+
         # convert to np float 32
-        vec_obs = obs['vector'].astype(np.float32)
-        rew = rew.astype(np.float32)
+        vec_obs = np.array([o['vector'] for o in obs]).astype(np.float32)
+        rew = np.array(rew).astype(np.float32)
         
         yield vec_obs, rew
 

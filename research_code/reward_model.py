@@ -54,6 +54,10 @@ class RewardMLP(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         vec_obs, reward = batch
+        vec_obs = vec_obs[0]
+        reward = reward[0]
+        print(f'{vec_obs.shape = }')
+        print(f'{reward.shape = }')
         if self.hparams.seq_len == 2:
             vec_obs = torch.diff(vec_obs, n=1, dim=0)
             reward = reward[1:]
@@ -61,7 +65,7 @@ class RewardMLP(pl.LightningModule):
         loss_scaling_factor = 2 ** reward.detach()
         predicted_reward = self.forward(vec_obs)[:,0]
         
-        loss = (self.loss_fn(predicted_reward, reward) * loss_scaling_factor).mean()
+        loss = torch.mean(self.loss_fn(predicted_reward, reward) * loss_scaling_factor)
 
         self.log('Training/loss', loss, on_step=True)
         return loss
@@ -124,7 +128,7 @@ def train(
         
     # load data
     data = datasets.RewardData(env_name, data_dir, epochs)
-    dataloader = DataLoader(data)
+    dataloader = DataLoader(data, num_workers=1)
 
     # create callbacks to sample reconstructed images and for model checkpointing
     checkpoint_callback = ModelCheckpoint(mode="min", monitor="Training/loss", save_last=True, every_n_train_steps=save_freq)
