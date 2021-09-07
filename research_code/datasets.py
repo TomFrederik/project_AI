@@ -87,41 +87,20 @@ def get_data(env_name, num_samples=0, data_dir=None):
 
     return all_actions, all_pov_obs, all_vec_obs, all_rewards, all_traj_starts
 
-class RewardData(Dataset):
+class RewardData(IterableDataset):
 
-    def __init__(self, env_name, data_dir, num_data=0, upsample=True, backfill=True, backfill_discount=0.99):
+    def __init__(self, env_name, data_dir, upsample=False, backfill=False, backfill_discount=0.99):
         '''
-        Dataset to learn to predict reward given [pov_obs, vec_obs]
+        Dataset to learn to predict reward given vec_obs
         '''
         super().__init__()
 
-        print(f'\nLoading data of {env_name} from {data_dir}..')
-
         # load data
-        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        pov_obs, vec_obs, rewards, traj_starts = data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts']
-
-        if num_data > 0:
-            pov_obs = pov_obs[:num_data]
-            vec_obs = vec_obs[:num_data]
-            rewards = rewards[:num_data]
-            traj_starts = traj_starts[:num_data]
-
-        self.pov_obs = np.array(pov_obs)
-        self.vec_obs = np.array(vec_obs)
-        self.rewards = np.array(rewards)
-        self.traj_starts = np.array(traj_starts)
-
-        self.weights = np.ones_like(self.rewards)
-        num_non_zero_rew = len(self.rewards[self.rewards>0])
-        num_zero_rew = len(self.rewards) - num_non_zero_rew
-        print(f'Share of non-zero rewards = {num_non_zero_rew / len(self.rewards) * 100:.3f} %')
-        if backfill:
-            print('Backfilling... Upsampling will not be used!')
-            self.rewards = self.backfill(self.rewards, self.traj_starts, backfill_discount)
-        elif upsample:
-            # weights of non-zero rew should have same sum as weights of zero rew
-            self.weights[self.rewards > 0] = num_zero_rew / num_non_zero_rew
+        self.data = minerl.data.make(env_name, data_dir)
+        
+        self.names = self.data.get_trajectory_names()
+        self.names.shuffle()
+        self.names = iter(self.names)
         
     def backfill(self, rew, starts, gamma):
         for i in range(len(rew)-2, -1, -1):
@@ -131,48 +110,16 @@ class RewardData(Dataset):
                 rew[i] += gamma*rew[i+1]
         return rew
 
+    def __iter__(self):
+        # load traj
+        obs, _, rew, *_ = self.data.load_data(next(self.names))
+        
+        # convert to np float 32
+        vec_obs = obs['vector'].astype(np.float32)
+        rew = rew.astype(np.float32)
+        
+        yield vec_obs, rew
 
-    def __len__(self):
-        return len(self.rewards)
-    
-    def __getitem__(self, idx):
-        # transform image to float array
-        pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
-
-        return pov, self.vec_obs[idx].astype(np.float32), self.rewards[idx].astype(np.float32)
-
-class VAEData(Dataset):
-
-    def __init__(self, env_name, data_dir, num_data=0):
-
-        super().__init__()
-
-        print(f'\nLoading data of {env_name} from {data_dir}..')
-
-        # load data
-        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        actions, pov_obs, vec_obs, rewards, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts'] 
-
-        if num_data > 0:
-            actions = actions[:num_data]
-            pov_obs = pov_obs[:num_data]
-            vec_obs = vec_obs[:num_data]
-            rewards = rewards[:num_data]
-
-        self.actions = np.array(actions)
-        self.pov_obs = np.array(pov_obs)
-        self.vec_obs = np.array(vec_obs)
-        self.rewards = np.array(rewards)
-
-
-    def __len__(self):
-        return len(self.actions)
-    
-    def __getitem__(self, idx):
-        # transform image to float array
-        pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
-
-        return self.actions[idx].astype(np.float32), pov, self.vec_obs[idx], self.rewards[idx]
 
 class DynamicsData(Dataset):
 
@@ -246,76 +193,9 @@ class DynamicsData(Dataset):
 
         return pov, vec_obs, act, rew
 
-class VectorObsData(Dataset):
 
-    def __init__(self, env_name, data_dir, num_data=0):
-        super().__init__()
 
-        print(f'\nLoading data of {env_name} from {data_dir}..')
-        # load data
-        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        actions, pov_obs, vec_obs, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['traj_starts'] 
 
-        new_actions = []
-        new_pov_obs = []
-        new_vec_obs = []
-        new_targets = []
-
-        # traverse backwards through trajectories
-        n_data = 0
-        cur_frame = len(traj_starts)-2
-        done = False
-        
-        print(vec_obs[0])
-        print(vec_obs[-1])
-        rng = np.random.default_rng(42)
-        while cur_frame >= 0:
-            if cur_frame < 0:
-                break
-            
-            # skip last frame in an episode
-            if traj_starts[cur_frame+1] == 1:
-                cur_frame -= 1
-                continue
-
-            if (vec_obs[cur_frame] == vec_obs[cur_frame+1]).all():
-                if rng.random() > 0.025/0.975:
-                    cur_frame -= 1
-                    continue
-            
-            new_actions.append(actions[cur_frame])
-            new_pov_obs.append(pov_obs[cur_frame])
-            new_vec_obs.append(vec_obs[cur_frame])
-            new_targets.append(0 if (vec_obs[cur_frame] == vec_obs[cur_frame+1]).all() else 1)
-            
-            # check if enough data has been collected
-            if num_data > 0:
-                n_data += 1
-                if n_data >= num_data:
-                    break
-            cur_frame -= 1
-
-        self.actions = np.array(new_actions)
-        self.pov_obs = np.array(new_pov_obs)
-        self.vec_obs = np.array(new_vec_obs)
-        self.targets = np.array(new_targets)
-        
-        print(f'\nNumber of positive targets = {np.sum(self.targets)}')
-        print(f'Percentage of positive targets = {np.sum(self.targets)/len(self.targets)}')
-
-    def __len__(self):
-        return len(self.actions)
-    
-    def __getitem__(self, idx):
-        # transform image to float array
-        pov = (self.pov_obs[idx].astype(np.float32) / 255)
-        pov = einops.rearrange(pov, 'h w c -> c h w')
-
-        vec_obs = self.vec_obs[idx].astype(np.float32)
-        act = self.actions[idx].astype(np.float32)
-        target = self.targets[idx].astype(np.float32)
-
-        return pov, vec_obs, act, target
 
 class PretrainQNetIterableData(IterableDataset):
     def __init__(self, env_name, data_dir, centroids, n_step, gamma, num_workers):
@@ -520,29 +400,7 @@ class BufferedBatchDataset(IterableDataset):
         return self.iter.buffered_batch_iter(self.batch_size, self.num_epochs)
 
 
-class BehavCloneData(Dataset):
 
-    def __init__(self, env_name, data_dir):
-
-        super().__init__()
-        
-        print(f'\nLoading data of {env_name} from {data_dir}..')
-        # load data
-        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        self.actions, self.pov_obs, self.vec_obs = data['actions'], data['pov_obs'], data['vec_obs']
-
-    def __len__(self):
-        return len(self.actions)
-    
-    def __getitem__(self, idx):
-        # transform image to float array
-        pov = tv.transforms.functional.to_tensor(self.pov_obs[idx])
-        pov = pov.numpy().astype(np.float32)
-
-        # get action
-        act = self.actions[idx].astype(np.float32)
-
-        return pov, self.vec_obs[idx].astype(np.float32), act
 
 
 

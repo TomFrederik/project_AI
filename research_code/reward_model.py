@@ -16,9 +16,11 @@ from vecobs_vqvae import VecObsVQVAE
 
 
 class RewardMLP(pl.LightningModule):
-    def __init__(self, hidden_dims, learning_rate, scheduler_kwargs, quantizer_path):
+    def __init__(self, hidden_dims, learning_rate, scheduler_kwargs, quantizer_path, seq_len):
         super().__init__()
         self.save_hyperparameters()
+
+        assert seq_len in [1,2]
 
         # set up quantizer
         if quantizer_path is not None:
@@ -51,9 +53,11 @@ class RewardMLP(pl.LightningModule):
         return self.mlp(out)
     
     def training_step(self, batch, batch_idx):
-        obs, _, reward, *_ = batch
-        vec_obs = obs['vector'][0].float()
-        reward = torch.log2(1+reward[0])
+        vec_obs, reward = batch
+        if self.hparams.seq_len == 2:
+            vec_obs = torch.diff(vec_obs, n=1, dim=0)
+            reward = reward[1:]
+        reward = torch.log2(1+reward)
         loss_scaling_factor = 2 ** reward.detach()
         predicted_reward = self.forward(vec_obs)[:,0]
         
@@ -88,7 +92,8 @@ def train(
     model_class, 
     load_from_checkpoint, 
     version,
-    quantizer_version
+    quantizer_version,
+    seq_len
 ):
     pl.seed_everything(1337)
 
@@ -115,10 +120,10 @@ def train(
         model = RewardMLP.load_from_checkpoint(checkpoint, lr=lr)
     else:
         scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
-        model = RewardMLP(hidden_dims, lr, scheduler_kwargs, quantizer_path)
+        model = RewardMLP(hidden_dims, lr, scheduler_kwargs, quantizer_path, seq_len)
         
     # load data
-    data = datasets.BufferedBatchDataset(env_name, data_dir, batch_size, epochs)
+    data = datasets.RewardData(env_name, data_dir, epochs)
     dataloader = DataLoader(data)
 
     # create callbacks to sample reconstructed images and for model checkpointing
@@ -130,7 +135,6 @@ def train(
         default_root_dir=log_dir,
         max_epochs=epochs,
         log_every_n_steps=10,
-        track_grad_norm=2
     )
                     
     # fit model
@@ -146,6 +150,7 @@ if __name__=='__main__':
     parser.add_argument('--batch_size', default=128, type=int)
     parser.add_argument('--save_freq', default=100, type=int)
     parser.add_argument('--epochs', default=1, type=int)
+    parser.add_argument('--seq_len', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
     parser.add_argument('--lr_gamma', default=0.5, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
