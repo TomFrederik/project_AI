@@ -88,6 +88,41 @@ def get_data(env_name, num_samples=0, data_dir=None):
 
     return all_actions, all_pov_obs, all_vec_obs, all_rewards, all_traj_starts
 
+
+class TrajectoryData(IterableDataset):
+
+    def __init__(self, env_name, data_dir, num_workers=1):
+        '''
+        Dataset that returns whole trajectories
+        '''
+        super().__init__()
+
+        # load data
+        self.data = minerl.data.make(env_name, data_dir)
+        
+        self.names = self.data.get_trajectory_names()
+        shuffle(self.names)
+        worker_names = [self.names[i:len(self.names)//num_workers*(i+1)] for i in range(num_workers)]
+        self.iter_per_worker = [iter(worker_names[i]) for i in range(num_workers)]
+        
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id
+
+        # load traj
+        obs, act, rew, *_ = zip(*self.data.load_data(next(self.iter_per_worker[worker_id])))
+
+        
+        # convert to np float 32
+        vec_obs = np.array([o['vector'] for o in obs]).astype(np.float32)
+        act = np.array([a['vector'] for a in act]).astype(np.float32)
+        pov_obs = np.array([o['pov'] for o in obs]).astype(np.float32) / 255
+        rew = np.array(rew).astype(np.float32)
+        
+        yield pov_obs, vec_obs, act, rew
+
+
+
 class RewardData(IterableDataset):
 
     def __init__(self, env_name, data_dir, num_workers=1, upsample=False, backfill=False, backfill_discount=0.99):
