@@ -8,6 +8,7 @@ import math
 from argparse import ArgumentParser, Namespace
 
 import numpy as np
+import einops
 
 from torchvision.utils import make_grid
 
@@ -31,7 +32,7 @@ import datasets
 
 class VQVAE(pl.LightningModule):
 
-    def __init__(self, args, input_channels=3):
+    def __init__(self, args, input_channels=3, log_perplexity=False, perplexity_freq=500):
         super().__init__()
         self.save_hyperparameters()
 
@@ -91,30 +92,46 @@ class VQVAE(pl.LightningModule):
         return z_q, diff, ind, neg_dist
     
     def training_step(self, batch, batch_idx):
-        img = batch[1]
+        # unpack batch and do some basic transforms on the image
+        obs, *_ = batch
+        img = obs['pov']
+        img = einops.rearrange(img, 'b h w c -> b c h w') # switch to channel-first
+        img = img.float() / 255 # convert from uint8 to float32
+
+        # center image values
         img = self.recon_loss.inmap(img)
+        
+        # forward pass
         img_hat, latent_loss, ind = self.forward(img)
+        
+        # compute reconstruction loss
         recon_loss = self.recon_loss.nll(img, img_hat)
+        
+        # loss = reconstruction_loss + codebook loss from quantizer
         loss = recon_loss + latent_loss
-        self.log('Training/batch_loss', loss, on_step=True)
+        
+        # logging
+        self.log('Training/loss', loss, on_step=True)
+        self.log('Training/recon_loss', recon_loss, on_step=True)
+        self.log('Training/latent_loss', latent_loss, on_step=True)
+        self.log('Training/pseudo_bpd', loss / (64*64*3) * np.log2(np.exp(1)), on_step=True)
+        if self.hparams.log_perplexity:
+            if (self.global_step + 1) % self.hparams.perplexity_freq == 0:
+                self.eval()
+                perplexity, cluster_use = self._compute_perplexity(ind)
+                self.train()
+                self.log('Training/perplexity', perplexity, prog_bar=True)
+                self.log('Training/cluster_use', cluster_use, prog_bar=True)
         return loss
 
-    def validation_step(self, batch, batch_idx):
-        img = batch[1]
-        img = self.recon_loss.inmap(img)
-        img_hat, latent_loss, ind = self.forward(img)
-        recon_loss = self.recon_loss.nll(img, img_hat)
-        loss = recon_loss + latent_loss
-        self.log('Validation/loss', loss, on_epoch=True)
-        return loss
-
+    @torch.no_grad()
+    def _compute_perplexity(self, ind):
         # debugging: cluster perplexity. when perplexity == num_embeddings then all clusters are used exactly equally
         encodings = F.one_hot(ind, self.quantizer.n_embed).float().reshape(-1, self.quantizer.n_embed)
         avg_probs = encodings.mean(0)
         perplexity = (-(avg_probs * torch.log(avg_probs + 1e-10)).sum()).exp()
         cluster_use = torch.sum(avg_probs > 0)
-        self.log('val_perplexity', perplexity, prog_bar=True)
-        self.log('val_cluster_use', cluster_use, prog_bar=True)
+        return perplexity, cluster_use
 
     def configure_optimizers(self):
 
@@ -190,45 +207,34 @@ class DecayLR(pl.Callback):
 
 
 class GenerateCallback(pl.Callback):
-    def __init__(self, batch_size=6, every_n_epochs=1, dataset=None, save_to_disk=False, every_n_batches=100, precision=32):
+    def __init__(self, batch_size=6, dataset=None, save_to_disk=False, every_n_batches=100, precision=32):
         """
         Inputs:
             batch_size - Number of images to generate
-            every_n_epochs - Only save those images every N epochs (otherwise tensorboard gets quite large)
             dataset - Dataset to sample from
             save_to_disk - If True, the samples and image means should be saved to disk as well.
         """
         super().__init__()
         self.batch_size = batch_size
-        self.every_n_epochs = every_n_epochs
         self.every_n_batches = every_n_batches
         self.save_to_disk = save_to_disk
-        self.dataset = dataset
+        self.initial_loading = False
+        obs, *_ = next(dataset.iter.buffered_batch_iter(batch_size, num_batches=1))
+        img = torch.from_numpy(obs['pov'])
+        
+        img = einops.rearrange(img, 'b h w c -> b c h w')
+        img = img.float() / 255
+        self.img_batch = img
 
-        #x_samples, x_mean = pl_module.sample(self.batch_size)
-        idx = np.random.choice(len(self.dataset), replace=False, size=self.batch_size)
-        batch = [self.dataset[i] for i in idx]
-        self.img_batch = torch.stack([b[1] for b in batch], dim=0)
-        if precision == 16:
-            self.img_batch = self.img_batch.half()
-
-    def on_epoch_end(self, trainer, pl_module):
-        """
-        This function is called after every epoch.
-        Call the save_and_sample function every N epochs.
-        """
-        if (trainer.current_epoch+1) % self.every_n_epochs == 0:
-            self.sample_and_save(trainer, pl_module, trainer.current_epoch+1)
-    
     def on_batch_end(self, trainer, pl_module):
         """
         This function is called after every epoch.
         Call the save_and_sample function every N epochs.
         """
         if (pl_module.global_step+1) % self.every_n_batches == 0:
-            self.sample_and_save(trainer, pl_module, pl_module.global_step+1)
+            self.reconstruct(trainer, pl_module, pl_module.global_step+1)
 
-    def sample_and_save(self, trainer, pl_module, epoch):
+    def reconstruct(self, trainer, pl_module, epoch):
         """
         Function that generates and save samples from the VAE.
         The generated samples and mean images should be added to TensorBoard and,
@@ -238,14 +244,6 @@ class GenerateCallback(pl.Callback):
             pl_module - The VAE model that is currently being trained.
             epoch - The epoch number to use for TensorBoard logging and saving of the files.
         """
-        # Hints:
-        # - You can access the logging directory path via trainer.logger.log_dir, and
-        # - You can access the tensorboard logger via trainer.logger.experiment
-        # - Use the torchvision function "make_grid" to create a grid of multiple images
-        # - Use the torchvision function "save_image" to save an image grid to disk 
-
-        #x_samples, x_mean = pl_module.sample(self.batch_size)
-        
         if self.img_batch.device != pl_module.device:
             self.img_batch = self.img_batch.to(pl_module.device)
 
@@ -269,16 +267,19 @@ def cli_main():
     parser.add_argument("--vq_flavor", type=str, default='vqvae', choices=['vqvae', 'gumbel'])
     parser.add_argument("--enc_dec_flavor", type=str, default='deepmind', choices=['deepmind', 'openai'])
     parser.add_argument("--loss_flavor", type=str, default='l2', choices=['l2', 'logit_laplace'])
+    parser.add_argument('--callback_batch_size', type=int, default=6, help='How many images to reconstruct for callback (shown in tensorboard/images)')
+    parser.add_argument('--callback_freq', type=int, default=100, help='How often to reconstruct for callback (shown in tensorboard/images)')
+    parser.add_argument('--save_freq', type=int, default=500, help='Save the model every N training steps')
+    parser.add_argument('--log_freq', type=int, default=10)
+    parser.add_argument('--progbar_rate', type=int, default=10)
     # model size
     parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
     parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
     parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
 # dataloader related
-    parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data/numpy_data')
+    parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_workers", type=int, default=6)
-    parser.add_argument("--val_perc", type=float, default=0.001)
+    parser.add_argument("--batch_size", type=int, default=20)
     # model loading args
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
     parser.add_argument('--version', default=None, type=int, help='Version of model, if training is resumed from checkpoint')
@@ -311,30 +312,37 @@ def cli_main():
         model = VQVAE(args = vqvae_args)
 
     # load data
-    data = datasets.VAEData(args.env_name, args.data_dir)
-    lengths = [len(data)-int(len(data)*args.val_perc), int(len(data)*args.val_perc)]
-    train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=args.batch_size, num_workers=args.num_workers)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers)
-
-    num_batches = len(train_data) // args.batch_size
-    if len(train_data) % args.batch_size != 0:
-        num_batches += 1
-
-    print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
-    print(f'num val samples = {len(val_data)}')
+    data = datasets.BufferedBatchDataset(args.env_name, args.data_dir, args.batch_size, num_epochs=1)
+    dataloader = DataLoader(data, batch_size=None, num_workers=1)
 
     # annealing schedules for lots of constants
     callbacks = []
-    callbacks.append(ModelCheckpoint(monitor='Validation/loss', mode='min', save_last=True))
+    callbacks.append(ModelCheckpoint(monitor='loss', mode='min', save_last=True, every_n_train_steps=args.save_freq))
     # create callbacks to sample reconstructed images
-    callbacks.append(GenerateCallback(dataset=val_data, save_to_disk=False))
+    callbacks.append(
+        GenerateCallback(
+            batch_size=args.callback_batch_size, 
+            dataset=data, 
+            save_to_disk=False, 
+            every_n_batches=args.callback_freq
+        )
+    )
     callbacks.append(DecayLR())
     if args.vq_flavor == 'gumbel':
        callbacks.extend([DecayTemperature(), RampBeta()])
-    trainer = pl.Trainer.from_argparse_args(args, callbacks=callbacks, default_root_dir=log_dir, gpus=torch.cuda.device_count())
+    
+    # create trainer instance
+    trainer = pl.Trainer(
+        callbacks=callbacks, 
+        default_root_dir=log_dir, 
+        gpus=torch.cuda.device_count(),
+        max_epochs=1,
+        accelerator='dp',
+        log_every_n_steps=args.log_freq,
+        progress_bar_refresh_rate=args.progbar_rate
+    )
 
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, dataloader)
 
 if __name__ == "__main__":
     cli_main()

@@ -5,7 +5,7 @@ import numpy as np
 from torch.cuda.amp import autocast 
 from torch.optim import AdamW
 
-
+import einops
 import util_models
 from torchvision.transforms import ToPILImage # used to transform input to VAE to uint image
 from deepspeed.ops.adam import  DeepSpeedCPUAdam, FusedAdam
@@ -103,14 +103,13 @@ class VAE(pl.LightningModule):
     '''
     A base class for VAEs
     '''
-    def __init__(self, encoder_class, decoder_class, encoder_kwargs, decoder_kwargs, learning_rate, scheduler_kwargs, batch_size, beta=1):
+    def __init__(self, encoder_class, decoder_class, encoder_kwargs, decoder_kwargs, learning_rate, batch_size, beta=1):
         '''
         beta - positive float which controls the strength of the regularization, as described in beta-VAE paper. 
         '''
         super().__init__()
         self.save_hyperparameters()
         self.learning_rate = learning_rate
-        self.scheduler_kwargs = scheduler_kwargs
         self.beta = beta
 
         self.encoder = encoder_class(**encoder_kwargs)
@@ -144,7 +143,8 @@ class VAE(pl.LightningModule):
 
         # sample latent vector
         z = self.sample(mean, log_std)
-
+        return torch.clip(0.5 + self.decoder(z), 0, 1)
+        '''
         # decode
         probs = torch.nn.functional.softmax(self.decoder(z), dim=1)
 
@@ -153,7 +153,7 @@ class VAE(pl.LightningModule):
         #sampled_x = self.decoder(z)
         return sampled_x.float() / 255
         #return sampled_x
-
+        '''
     @torch.no_grad()
     def encode_only(self, x):
         '''
@@ -177,6 +177,8 @@ class VAE(pl.LightningModule):
 
     @torch.no_grad()
     def decode_only(self, z):
+        return torch.clip(0.5 + self.decoder(z), 0, 1)
+        '''
         # decode
         probs = torch.nn.functional.softmax(self.decoder(z), dim=1)
 
@@ -185,44 +187,29 @@ class VAE(pl.LightningModule):
         #sampled_x = self.decoder(z)
 
         return sampled_x.float() / 255
-
+        '''
     def forward(self, x):
         '''
         x - input, for mineRL (B, C, H, W) batch of frames
         '''
         # encode
-        x.requires_grad = True
-        
-        #mean, log_std = deepspeed.checkpointing.checkpoint(self.encoder, x)
-        # normalize each channel of each image
-        #means = x.mean(dim=[2,3])
-        #stds = x.std(dim=[2,3])
-        # encode
-        #mean, log_std = self.encoder((x - means[...,None,None]) / stds[...,None,None])
         mean, log_std = self.encoder(x)
-        
 
-
-        # compute KL difstance, i.e. regularization loss
+        # compute KL distance, i.e. regularization loss
         L_regul = (0.5 * (torch.exp(2 * log_std) + mean ** 2 - 1 - 2 * log_std)).sum(dim=-1).mean()
 
         # sample latent vector
         z = self.sample(mean, log_std)
         
         # decode
-        #x_new = deepspeed.checkpointing.checkpoint(self.decoder, z)
         x_new = self.decoder(z)
         
         # convert x to classes
-        x = (x * 255).type(torch.long)
-
-        # make sure that x_new is fp32, otherwise nan error in loss
-        #x_new = x_new.float()
+        #x = (x * 255).type(torch.long)
 
         # compute reconstruction loss, sum over all dimension except batch
-        L_reconstr = self.CE_loss(x_new, x).sum(dim=list(range(1,len(x.shape)))).mean()
-        #L_reconstr = self.mse_loss(x_new,x)
-        print(f"L_reconstr = {L_reconstr.item()}")
+        #L_reconstr = self.CE_loss(x_new, x).sum(dim=list(range(1,len(x.shape)))).mean()
+        L_reconstr = nn.MSELoss(reduction='none')(x_new, x).sum(dim=[1,2,3]).mean()
 
         # compute elbo
         elbo =  L_reconstr + self.beta * L_regul
@@ -234,29 +221,23 @@ class VAE(pl.LightningModule):
     
     def configure_optimizers(self):
         # set up optimizer
-        optimizer =  AdamW(self.parameters(), lr=self.learning_rate)
-        # set up 
-        lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.scheduler_kwargs['lr_gamma'])
-        lr_dict = {
-            'scheduler': lr_scheduler,
-            'interval': self.scheduler_kwargs['lr_step_mode'],
-            'frequency': self.scheduler_kwargs['lr_decrease_freq'],
-        }
-        return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
+        self.optimizer =  AdamW(self.parameters(), lr=self.learning_rate)
+        return self.optimizer
     
     def training_step(self, batch, batch_idx):
-        img = batch[1]
-        _, _, bpd = self(img)
-        print(f'Step {self.global_step + 1}: bpd = {bpd.mean().item()}')
+        obs, *_ = batch
+        obs = obs['pov'][0].float() / 255 - 0.5
+        obs = einops.rearrange(obs, 'b h w c -> b c h w')
+        L_rec, L_reg, bpd = self(obs)
+        #print(f'Step {self.global_step + 1}: bpd = {bpd.mean().item()}')
         
-        self.log('Training/batch_bpd', bpd.mean().item(),on_step=True)
+        L_rec = L_rec / np.prod(obs.shape[1:])
 
-        return bpd
-    
-    def validation_step(self, batch, batch_idx):
-        img = batch[1]
-        _, _, bpd = self(img)
-        self.log('Validation/bpd', bpd.mean().item(), on_epoch=True)
+        self.log('Training/bpd', bpd.mean().item(),on_step=True)
+        self.log('Training/reconstruction_loss', L_rec,on_step=True)
+        self.log('Training/latent_loss', L_reg,on_step=True)
+        self.log('Training/L_reg + L_rec', L_rec + L_reg,on_step=True)
+
         return bpd
     
 class ConvVAE(VAE):
@@ -276,14 +257,13 @@ class ConvVAE(VAE):
 
 class ResnetVAE(VAE):
     
-    def __init__(self, encoder_kwargs, decoder_kwargs, learning_rate, scheduler_kwargs, batch_size, beta):
+    def __init__(self, encoder_kwargs, decoder_kwargs, learning_rate, batch_size, beta=1):
         kwargs = {
             'encoder_class':ResnetEncoder,
             'decoder_class':ResnetDecoder,
             'encoder_kwargs':encoder_kwargs,
             'decoder_kwargs':decoder_kwargs,
             'learning_rate':learning_rate,
-            'scheduler_kwargs':scheduler_kwargs,
             'batch_size':batch_size,
             'beta':beta
         }
@@ -328,16 +308,6 @@ class ResnetEncoder(nn.Module):
             nn.Linear(num_channels[-1] * 4, 2 * latent_dim)
         )
 
-        '''
-        # init parameters
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        '''
-
     def forward(self, input):
         x = self.input_net(input)
         for b in self.blocks:
@@ -364,7 +334,7 @@ class ResnetDecoder(nn.Module):
         self.latent_to_2d = nn.Sequential(nn.Linear(latent_dim, 16*num_channels[0]), nn.GELU())
         
         # Creating the ResNet blocks
-        layers = []
+        layers = [nn.UpsamplingNearest2d(scale_factor=2)]
         for block_idx, block_count in enumerate(num_blocks):
             if block_idx > 0:
                 layers.append(nn.Conv2d(in_channels=num_channels[block_idx-1], out_channels=num_channels[block_idx], kernel_size=1, stride=1, padding=0)) # change channel_dim
@@ -377,22 +347,14 @@ class ResnetDecoder(nn.Module):
 
 
         # conv to 3 * 255 channels
-        layers.append(nn.Conv2d(num_channels[-1], 768, kernel_size=kernel_size, padding=padding))
-        layers.append(util_models.SplitChannelsFromClasses(num_channels=3))
+        layers.append(nn.Conv2d(num_channels[-1], 3, kernel_size=kernel_size, padding=padding))
+        layers.append(nn.Tanh())
+        #layers.append(util_models.SplitChannelsFromClasses(num_channels=3))
         #layers.append(nn.Conv2d(num_channels[-1], 3, kernel_size=kernel_size, padding=padding))
         #layers.append(nn.Sigmoid())
         self.deconv = nn.Sequential(*layers)
 
 
-        '''
-        # init parameters
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        '''
     def forward(self, z):
         '''
         z - latent vector

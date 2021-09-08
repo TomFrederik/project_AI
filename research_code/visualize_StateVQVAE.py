@@ -42,9 +42,10 @@ def load_traj_data(pipeline, traj_name):
 @torch.no_grad()
 def reconstruct_data(model, pov_obs, vec_obs, actions):
     
-    max_seq_len = 200
-    predictions, *_ = model(pov_obs[None,:], vec_obs[None,:], actions[None,:], max_seq_len)
-    predictions = predictions[0]
+    #max_seq_len = 200
+    predictions, *_ = model(pov_obs[None,:], vec_obs[None,:], actions[None,:])
+    print(f'{predictions[0].shape = }')
+    predictions = predictions[0][0]
     idcs = torch.argmax(predictions, dim=1)
     predictions = einops.rearrange(model.vqvae.quantizer.embed(idcs), 'b h w c -> b c h w')
     
@@ -65,6 +66,8 @@ def select_traj(traj_name=None):
     else:
         pov_obs, vec_obs, actions = load_traj_data(st.session_state.pipeline,traj_name)
     rec_pov = reconstruct_data(st.session_state.model, pov_obs, vec_obs, actions)
+    print(f'{pov_obs.shape = }')
+    print(f'{rec_pov.shape = }')
     pov_obs = pov_obs[1:]
     st.session_state.all_losses = ((rec_pov - pov_obs) ** 2).mean(dim=[1,2,3]).cpu().numpy()
     st.session_state.pov = (einops.rearrange(pov_obs.cpu().numpy(), 'b c h w -> b h w c') * 255).astype(np.uint8)
