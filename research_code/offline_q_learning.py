@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+import matplotlib.pyplot as plt
+import numpy as np 
 
 from datasets import TrajectoryData
 
@@ -44,6 +46,8 @@ class VQVAEFeatureExtractor(nn.Module):
     def __init__(self, model_path, finetune_vqvae=False):
         super().__init__()
         self.vqvae = VQVAE.load_from_checkpoint(model_path)
+        
+        self.finetune_vqvae = finetune_vqvae
 
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels=self.vqvae.hparams.args.embedding_dim, out_channels=64, kernel_size=3, padding=1, stride=2), # 16 -> 8
@@ -63,7 +67,7 @@ class VQVAEFeatureExtractor(nn.Module):
             self.vqvae.eval()
             
     def forward(self, x):
-        if self.hparams.finetune_vqvae:
+        if self.finetune_vqvae:
             vqvae_latent = self.vqvae.encode_with_grad(x)[0]
         else:
             vqvae_latent = self.vqvae.encode_only(x)[0]
@@ -123,7 +127,14 @@ class OfflineQLearner(pl.LightningModule):
         
         self.vecobs_quantizer = VecobsQuantizer(vecobs_quantizer_path)
         self.vecobs_dim = self.vecobs_quantizer.output_dim
-        
+
+        # init discount matrix
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        discount_array = torch.tensor([self.hparams.discount_factor ** i for i in range(30001)], device=device)
+        self.discount_matrix = torch.zeros((30000,30000), device=device)
+        for i in range(len(self.discount_matrix)):
+            self.discount_matrix[i,i:] = discount_array[:-i-1]
+
         # init model
         # TODO make this more customizable
         if model_cls_name == 'vqvae':
@@ -168,7 +179,7 @@ class OfflineQLearner(pl.LightningModule):
             predicted_q_values.append(self._sub_batch_processing(
                 pov_obs[start:stop],
                 vec_obs[start:stop],
-                actions_obs[start:stop],
+                actions[start:stop],
             ))
         return torch.cat(predicted_q_values, dim=0)
             
@@ -180,22 +191,27 @@ class OfflineQLearner(pl.LightningModule):
         targets = self.compute_q_values(rew)
 
         predicted_q_values = self.forward(pov_obs, vec_obs, actions).squeeze()
-                
+        
         loss = nn.MSELoss(reduction='mean')(predicted_q_values, targets)
-        self.logger.experiment.add_histogram('Predicted_Q', predicted_q_values, self.global_step)
-        self.logger.experiment.add_histogram('True_Q', targets, self.global_step)
-        figure = plt.figure()
-        plt.plot(predicted_q_values.cpu().numpy())
-        plt.xlabel('Timestep t')
-        plt.ylabel('Q')
-        self.logger.experimten.add
-        self.logger.experiment.add_figure('Predicted_Q',figure, self.global_step)
-        figure = plt.figure()
-        plt.plot(targets.cpu().numpy())
-        plt.xlabel('Timestep t')
-        plt.ylabel('Q')
-        self.logger.experiment.add_figure('True_Q',figure, self.global_step)
         self.log('Training/loss', loss, on_step=True)
+
+        self.logger.experiment.add_histogram('Training/Predicted_Q', predicted_q_values, self.global_step)
+        self.logger.experiment.add_histogram('Training/True_Q', targets, self.global_step)
+
+        """
+        figure = plt.figure()
+        plt.plot(np.arange(len(predicted_q_values)), predicted_q_values.detach().cpu().numpy())
+        plt.xlabel('Timestep t')
+        plt.ylabel('Q')
+        self.logger.experiment.add_figure('Training/Predicted_Q',figure, self.global_step)
+
+        figure = plt.figure()
+        plt.plot(np.arange(len(targets)), targets.detach().cpu().numpy())
+        plt.xlabel('Timestep t')
+        plt.ylabel('Q')
+        self.logger.experiment.add_figure('Training/True_Q',figure, self.global_step)
+        """
+
         return loss
     
     def configure_optimizers(self):
@@ -206,12 +222,8 @@ class OfflineQLearner(pl.LightningModule):
     
     def compute_q_values(self, rew):
         assert len(rew.shape) == 1, f"{rew.shape = }, but expected (T,)"
-        # compute discount factors
-        discount_matrix = torch.tensor([self.hparams.discount_factor ** i for i in range(len(rew))], device=self.device)
-        discount_matrix = einops.repeat(discount_matrix, 'T -> repeat T', repeat=len(discount_matrix))
-        discount_matrix = torch.triu(discount_matrix)
         # compute q values from rewards and discount matrix
-        q_values = discount_matrix @ rew
+        q_values = self.discount_matrix[:len(rew), :len(rew)] @ rew
         return q_values
 
 def main(
@@ -272,8 +284,7 @@ def main(
         gpus=torch.cuda.device_count(),
         accelerator='dp',
         default_root_dir=log_path,
-        max_epochs=epochs,
-        track_grad_norm=2
+        max_epochs=epochs
     )
     
     # train model
