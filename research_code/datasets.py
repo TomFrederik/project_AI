@@ -99,7 +99,7 @@ class TrajectoryData(Dataset):
 
         # load data
         self.data = minerl.data.make(env_name, data_dir)
-        self.names = self.data.get_trajectory_names()[:2]
+        self.names = self.data.get_trajectory_names()
 
     def __len__(self):
         return len(self.names)
