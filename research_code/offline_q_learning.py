@@ -59,7 +59,9 @@ class VQVAEFeatureExtractor(nn.Module):
         self.trainable_params = list(self.conv.parameters())
         if finetune_vqvae:
             self.trainable_params += list(self.vqvae.parameters())
-    
+        else:
+            self.vqvae.eval()
+            
     def forward(self, x):
         if self.hparams.finetune_vqvae:
             vqvae_latent = self.vqvae.encode_with_grad(x)[0]
