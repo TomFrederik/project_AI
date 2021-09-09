@@ -103,7 +103,16 @@ class VecobsQuantizer(VectorQuantizer):
     
 
 class OfflineQLearner(pl.LightningModule):
-    def __init__(self, model_cls_name, model_path, discount_factor, lr, action_quantizer_path=None, vecobs_quantizer_path=None):
+    def __init__(
+        self, 
+        model_cls_name, 
+        model_path, 
+        discount_factor, 
+        lr, 
+        action_quantizer_path=None, 
+        vecobs_quantizer_path=None,
+        max_batch_size=2000
+    ):
         super().__init__()
         self.save_hyperparameters()
 
@@ -137,8 +146,7 @@ class OfflineQLearner(pl.LightningModule):
             nn.GELU()
         )
 
-
-    def forward(self, pov_obs, vec_obs, actions):
+    def _sub_batch_processing(self, pov_obs, vec_obs, actions):
         pov_features = self.pov_feature_extractor(pov_obs)
 
         actions = self.action_quantizer(actions)
@@ -149,7 +157,19 @@ class OfflineQLearner(pl.LightningModule):
         predicted_q_values = self.q_net(q_net_input)
         
         return predicted_q_values
-        
+    
+    def forward(self, pov_obs, vec_obs, actions):
+        predicted_q_values = []
+        for i in range((len(pov_obs) - 1) // self.hparams.max_batch_size + 1):
+            start = i * self.hparams.max_batch_size
+            stop = (i + 1) * self.hparams.max_batch_size
+            predicted_q_values.append(self._sub_batch_processing(
+                pov_obs[start:stop],
+                vec_obs[start:stop],
+                actions_obs[start:stop],
+            ))
+        return torch.cat(predicted_q_values, dim=0)
+            
     def training_step(self, batch, batch_idx):
         # unpack batch
         
@@ -162,6 +182,17 @@ class OfflineQLearner(pl.LightningModule):
         loss = nn.MSELoss(reduction='mean')(predicted_q_values, targets)
         self.logger.experiment.add_histogram('Predicted_Q', predicted_q_values, self.global_step)
         self.logger.experiment.add_histogram('True_Q', targets, self.global_step)
+        figure = plt.figure()
+        plt.plot(predicted_q_values.cpu().numpy())
+        plt.xlabel('Timestep t')
+        plt.ylabel('Q')
+        self.logger.experimten.add
+        self.logger.experiment.add_figure('Predicted_Q',figure, self.global_step)
+        figure = plt.figure()
+        plt.plot(targets.cpu().numpy())
+        plt.xlabel('Timestep t')
+        plt.ylabel('Q')
+        self.logger.experiment.add_figure('True_Q',figure, self.global_step)
         self.log('Training/loss', loss, on_step=True)
         return loss
     
