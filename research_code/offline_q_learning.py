@@ -158,13 +158,6 @@ class OfflineQLearner(pl.LightningModule):
         self.q_net = nn.Sequential(
             nn.Linear(q_net_input_dim, 1),
             nn.GELU(),
-            '''
-            nn.Linear(1000, 1000),
-            nn.GELU(),
-            nn.Linear(1000, 100),
-            nn.GELU(),
-            nn.Linear(100, 1),
-            nn.GELU()'''
         )
 
     def _sub_batch_processing(self, pov_obs, vec_obs, actions):

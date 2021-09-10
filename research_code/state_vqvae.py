@@ -131,8 +131,6 @@ class StateVQVAE(pl.LightningModule):
         # encode pov obs
         t = pov_obs.shape[1]
         pov_obs = einops.rearrange(pov_obs, 'b t c h w -> (b t) c h w')
-        # center images
-        pov_obs = self.vqvae.recon_loss.inmap(pov_obs)
         
         enc_pov_obs = torch.zeros(pov_obs.shape[0], self.vqvae.quantizer.embedding_dim, 16, 16).to(self.device)
         frame_quantization_idcs = []
