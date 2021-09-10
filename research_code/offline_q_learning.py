@@ -149,14 +149,15 @@ class OfflineQLearner(pl.LightningModule):
 
         q_net_input_dim = pov_features.shape[-1] + self.action_dim + self.vecobs_dim
         self.q_net = nn.Sequential(
-            nn.Linear(q_net_input_dim, 1000),
+            nn.Linear(q_net_input_dim, 1),
             nn.GELU(),
+            '''
             nn.Linear(1000, 1000),
             nn.GELU(),
             nn.Linear(1000, 100),
             nn.GELU(),
             nn.Linear(100, 1),
-            nn.GELU()
+            nn.GELU()'''
         )
 
     def _sub_batch_processing(self, pov_obs, vec_obs, actions):
@@ -230,7 +231,6 @@ def main(
     env_name,
     log_dir,
     data_dir,
-    batch_size,
     model_class_name,
     model_path,
     finetune_vqvae,
@@ -295,10 +295,9 @@ if __name__ == '__main__':
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
-    parser.add_argument('--model_class_name', default='conv')
+    parser.add_argument('--model_class_name', default='conv', choices=['conv', 'vqvae'])
     parser.add_argument('--model_path')
     parser.add_argument('--finetune_vqvae', action='store_true')
-    parser.add_argument('--batch_size', default=100, type=int)
     parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--save_freq', default=10, type=int)
     parser.add_argument('--lr', default=3e-4, type=float)

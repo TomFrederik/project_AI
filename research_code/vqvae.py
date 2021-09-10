@@ -60,7 +60,7 @@ class VQVAE(pl.LightningModule):
         self.recon_loss = ReconLoss
 
     def forward(self, x):
-        z = self.encoder(x)
+        z = self.encoder(self.recon_loss.inmap(x))
         z_q, latent_loss, ind, _ = self.quantizer(z)
         x_hat = self.decoder(z_q)
         return x_hat, latent_loss, ind
@@ -98,9 +98,6 @@ class VQVAE(pl.LightningModule):
         img = einops.rearrange(img, 'b h w c -> b c h w') # switch to channel-first
         img = img.float() / 255 # convert from uint8 to float32
 
-        # center image values
-        img = self.recon_loss.inmap(img)
-        
         # forward pass
         img_hat, latent_loss, ind = self.forward(img)
         
