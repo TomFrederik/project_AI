@@ -67,11 +67,18 @@ class VQVAEFeatureExtractor(nn.Module):
             self.vqvae.eval()
             
     def forward(self, x):
+        # center image
+        x = self.vqvae.recon_loss.inmap(x)
+
+        # quantize
         if self.finetune_vqvae:
             vqvae_latent = self.vqvae.encode_with_grad(x)[0]
         else:
-            vqvae_latent = self.vqvae.encode_only(x)[0]
+            vqvae_latent, ind, *_ = self.vqvae.encode_only(x)
+        
+        # distill
         conv_out = self.conv(vqvae_latent)
+        
         return einops.rearrange(conv_out, 'b c h w -> b (c h w)')
 
     @property
@@ -117,7 +124,7 @@ class OfflineQLearner(pl.LightningModule):
         lr, 
         action_quantizer_path=None, 
         vecobs_quantizer_path=None,
-        max_batch_size=2000
+        max_batch_size=1000
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -149,24 +156,22 @@ class OfflineQLearner(pl.LightningModule):
 
         q_net_input_dim = pov_features.shape[-1] + self.action_dim + self.vecobs_dim
         self.q_net = nn.Sequential(
-            nn.Linear(q_net_input_dim, 1000),
-            nn.GELU(),
-            nn.Linear(1000, 1000),
-            nn.GELU(),
-            nn.Linear(1000, 100),
+            nn.Linear(q_net_input_dim, 100),
             nn.GELU(),
             nn.Linear(100, 1),
             nn.GELU()
         )
 
     def _sub_batch_processing(self, pov_obs, vec_obs, actions):
+        # preprocess
         pov_features = self.pov_feature_extractor(pov_obs)
-
-        actions = self.action_quantizer(actions)
         vec_obs = self.vecobs_quantizer(vec_obs)
+        actions = self.action_quantizer(actions)
 
+        # stack inputs
         q_net_input = torch.cat([pov_features, vec_obs, actions], dim=1)
 
+        # predict q values
         predicted_q_values = self.q_net(q_net_input)
         
         return predicted_q_values
@@ -185,11 +190,11 @@ class OfflineQLearner(pl.LightningModule):
             
     def training_step(self, batch, batch_idx):
         # unpack batch
-        
         pov_obs, vec_obs, actions, rew = batch
         
         targets = self.compute_q_values(rew)
-
+        print(f'{targets = }')
+        print(f'{rew = }')
         predicted_q_values = self.forward(pov_obs, vec_obs, actions).squeeze()
         
         loss = nn.MSELoss(reduction='mean')(predicted_q_values, targets)
@@ -223,6 +228,7 @@ class OfflineQLearner(pl.LightningModule):
     def compute_q_values(self, rew):
         assert len(rew.shape) == 1, f"{rew.shape = }, but expected (T,)"
         # compute q values from rewards and discount matrix
+        print(f'self.discount_matrix[:len(rew), :len(rew)] = \n {self.discount_matrix[:len(rew), :len(rew)]}')
         q_values = self.discount_matrix[:len(rew), :len(rew)] @ rew
         return q_values
 
