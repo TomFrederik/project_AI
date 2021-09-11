@@ -86,32 +86,41 @@ class VQVAEFeatureExtractor(nn.Module):
         return self.trainable_params
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, model_class, model_path=None):
+    def __init__(self, model_class, model_path=None, centroids=True):
         super().__init__()
-        if model_path is not None:
+        self.centroids = centroids
+        if centroids:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.model = torch.from_numpy(np.load(model_path)).to(device)
+        elif model_path is not None:
             self.model = model_class.load_from_checkpoint(model_path)
         else:
             self.model = None
             
         dummy_input = torch.zeros(1,64)
         self.output_dim = self.forward(dummy_input).shape[1]
-        
+    
     def forward(self, x):
-        if self.model is None:
+        if self.centroids:
+            return self._compute_closest_centroids(x)  
+        elif self.model is None:
             return x
         else:
             return self.model.encode_only(x)[0]
+
+    def _compute_closest_centroids(self, x):
+        return torch.argmin((self.model[None,...] - x[:,None]).pow(2).sum(-1),-1)
 
     @property
     def trainable_params(self):
         return []
 
 class ActionQuantizer(VectorQuantizer):
-    def __init__(self, model_path=None):
+    def __init__(self, model_path=None, action_centroids=True):
         super().__init__(ActionVQVAE, model_path)
         
 class VecobsQuantizer(VectorQuantizer):
-    def __init__(self, model_path=None):
+    def __init__(self, model_path=None, vecobs_centroids=False):
         super().__init__(VecObsVQVAE, model_path)
     
 
@@ -123,13 +132,15 @@ class OfflineQLearner(pl.LightningModule):
         discount_factor, 
         lr, 
         action_quantizer_path=None, 
+        action_centroids=True,
         vecobs_quantizer_path=None,
-        max_batch_size=1000
+        max_batch_size=1000,
+        margin=0.8
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        self.action_quantizer = ActionQuantizer(action_quantizer_path)
+        self.action_quantizer = ActionQuantizer(action_quantizer_path, action_centroids)
         self.action_dim = self.action_quantizer.output_dim
         
         self.vecobs_quantizer = VecobsQuantizer(vecobs_quantizer_path)
@@ -230,6 +241,15 @@ class OfflineQLearner(pl.LightningModule):
         q_values = self.discount_matrix[:len(rew), :len(rew)] @ rew
         return q_values
 
+    def _large_margin_classification_loss(self, q_values, expert_action):
+        '''
+        Computes the large margin classification loss J_E(Q) from the DQfD paper
+        '''
+        idcs = torch.arange(0,len(q_values),dtype=torch.long)
+        q_values = q_values + self.hparams.margin
+        q_values[idcs, expert_action] = q_values[idcs,expert_action] - self.hparams.margin
+        return (torch.max(q_values, dim=1)[0] - q_values[idcs,expert_action]).mean()
+
 def main(
     env_name,
     log_dir,
@@ -245,12 +265,14 @@ def main(
     version,
     epochs,
     action_quantizer_version,
-    vecobs_quantizer_version
+    vecobs_quantizer_version,
+    margin,
+    action_num_centroids
 ):
     pl.seed_everything(1337)
 
     #
-    log_path = os.path.join(log_dir, 'OfflineQLearner', env_name, model_class_name)
+    log_path = os.path.join(log_dir, 'EpisodicOfflineQLearner', env_name, model_class_name)
     
     # load data
     data = TrajectoryData(env_name, data_dir)
@@ -258,9 +280,11 @@ def main(
 
     # set up model    
     if action_quantizer_version is None:
-        action_quantizer_path = None
+        action_quantizer_path = os.path.join(data_dir, env_name+'_centroids_'+str(action_num_centroids)+'.npy')
+        centroids = True
     else:
         action_quantizer_path = os.path.join(log_dir, 'ActionVQVAE', env_name, 'lightning_logs', 'version_'+str(action_quantizer_version), 'checkpoints', 'last.ckpt')
+        centroids = False
     
     if vecobs_quantizer_version is None:
         vecobs_quantizer_path = None
@@ -273,7 +297,9 @@ def main(
         discount_factor=discount_factor, 
         lr=lr,
         action_quantizer_path=action_quantizer_path,
-        vecobs_quantizer_path=vecobs_quantizer_path
+        action_centroids=centroids,
+        vecobs_quantizer_path=vecobs_quantizer_path,
+        margin=margin
     )
 
     # define callbacks
@@ -305,10 +331,12 @@ if __name__ == '__main__':
     parser.add_argument('--save_freq', default=10, type=int)
     parser.add_argument('--lr', default=3e-4, type=float)
     parser.add_argument('--discount_factor', default=0.99, type=float)
+    parser.add_argument('--margin', default=0.8, type=float)
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--epochs', default=2, type=int)
     parser.add_argument('--action_quantizer_version', default=None, type=int, help='Version of action quantizer')
+    parser.add_argument('--action_num_centroids', default=150, type=int, help='Number of clusters for actions, if using kmeans instead of vqvae')
     parser.add_argument('--vecobs_quantizer_version', default=None, type=int, help='Version of vecobs quantizer')
     
     args = parser.parse_args()
