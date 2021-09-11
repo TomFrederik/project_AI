@@ -15,6 +15,7 @@ from time import time
 import os
 import einops
 import argparse
+import math
 
 # for debugging
 torch.autograd.set_detect_anomaly(True)
@@ -118,61 +119,49 @@ def train_VAE(
     epochs, 
     log_dir, 
     latent_dim, 
-    num_encoder_channels, 
-    num_layers_per_block,
+    n_hid,
+    n_init,
     load_from_checkpoint, 
     version
 ):
-    
+    pl.seed_everything(1337)
+
     # make sure that relevant dirs exist
     run_name = f'VAE/{env_name}'
     log_dir = os.path.join(log_dir, run_name)
     os.makedirs(log_dir, exist_ok=True)
     print(f'Saving logs and model to {log_dir}')
 
-    kernel_size = 3
-    img_shape = (64,64)
-    num_blocks = [num_layers_per_block] * len(num_encoder_channels)
-    num_decoder_channels = num_encoder_channels.copy()
-    num_decoder_channels.reverse()
-    print(f'\nnum_encoder_channels = {num_encoder_channels}')
-    print(f'num_decoder_channels = {num_decoder_channels}')
-
     encoder_kwargs = {
-        'img_shape':img_shape,
         'latent_dim':latent_dim,
-        'num_channels':num_encoder_channels,
-        'kernel_size':kernel_size
+        'n_hid':n_hid,
     }
     decoder_kwargs = {
         'latent_dim':latent_dim,
-        'num_channels':num_decoder_channels,
-        'kernel_size':kernel_size
+        'n_hid':n_hid,
+        'n_init':n_init
     }
     
-    encoder_kwargs['num_blocks'] = num_blocks
-    decoder_kwargs['num_blocks'] = num_blocks
-
     # init model
     if load_from_checkpoint:
         checkpoint = os.path.join(log_dir, 'lightning_logs', 'version_'+str(version), 'checkpoints', 'last.ckpt')
         print(f'\nLoading model from {checkpoint}')
-        model = visual_models.ResnetVAE.load_from_checkpoint(checkpoint)
+        model = visual_models.VAE.load_from_checkpoint(checkpoint)
     else:
-        model = visual_models.ResnetVAE(encoder_kwargs, decoder_kwargs, lr, batch_size)
+        model = visual_models.VAE(encoder_kwargs, decoder_kwargs, lr)
     
     # load data
     train_data = datasets.BufferedBatchDataset(env_name, data_dir, batch_size, epochs)
-    train_loader = DataLoader(train_data, num_workers=1)
+    train_loader = DataLoader(train_data, batch_size=None, num_workers=1)
 
     # create callbacks to sample reconstructed images and for model checkpointing
     img_callback =  GenerateCallback(dataset=train_data, save_to_disk=False)
-    checkpoint_callback = ModelCheckpoint(mode="min", monitor="Training/bpd", save_last=True, every_n_train_steps=save_freq)
+    checkpoint_callback = ModelCheckpoint(mode="min", monitor="Training/loss", save_last=True, every_n_train_steps=save_freq)
     callbacks = [img_callback, checkpoint_callback, DecayLR(), RampBeta()]
     trainer=pl.Trainer(
         progress_bar_refresh_rate=10, #every N batches update progress bar
         log_every_n_steps=10,
-        callbacks=[img_callback, checkpoint_callback],
+        callbacks=callbacks,
         gpus=torch.cuda.device_count(),
         #accelerator='ddp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
@@ -190,13 +179,13 @@ if __name__=='__main__':
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
     parser.add_argument('--batch_size', default=20, type=int)
-    parser.add_argument('--latent_dim', default=128, type=int)
+    parser.add_argument('--latent_dim', default=80, type=int)
+    parser.add_argument('--n_hid', default=5, type=int)
+    parser.add_argument('--n_init', default=210, type=int)
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
     parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct images for tensorboard')
     parser.add_argument('--save_freq', default=100, type=int, help='How often to save model')
-    parser.add_argument('--num_encoder_channels', default=[32,64,128,256], type=int, nargs='+')
-    parser.add_argument('--num_layers_per_block', default=2, type=int, help='Number of layers per Residual Block. Only used in ResNet.')
     parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
     parser.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
 

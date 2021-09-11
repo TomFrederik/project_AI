@@ -128,4 +128,4 @@ class GumbelQuantize(nn.Module):
         diff = self.kld_scale * torch.sum(qy * torch.log(qy * self.n_embed + 1e-10), dim=1).mean()
 
         ind = soft_one_hot.argmax(dim=1)
-        return z_q, diff#, ind
+        return z_q, diff, ind, None

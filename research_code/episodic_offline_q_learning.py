@@ -12,6 +12,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 import matplotlib.pyplot as plt
 import numpy as np 
+from copy import deepcopy
 
 from datasets import TrajectoryData
 
@@ -89,27 +90,36 @@ class VectorQuantizer(nn.Module):
     def __init__(self, model_class, model_path=None, centroids=True):
         super().__init__()
         self.centroids = centroids
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if centroids:
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.model = torch.from_numpy(np.load(model_path)).to(device)
+            self.model = torch.from_numpy(np.load(model_path).astype(np.float32)).to(device)
         elif model_path is not None:
-            self.model = model_class.load_from_checkpoint(model_path)
+            self.model = model_class.load_from_checkpoint(model_path).to(device)
         else:
             self.model = None
             
-        dummy_input = torch.zeros(1,64)
-        self.output_dim = self.forward(dummy_input).shape[1]
-    
+        dummy_input = torch.zeros(1,64, device=device)
+        if self.model is None: # vecobs
+            self.output_dim = self.forward(dummy_input).shape[1]
+        else: # action
+            centroids, idcs = self.forward(dummy_input)
+            self.output_dim = centroids.shape[1]
+            self.num_actions = self.model.shape[0]
+
     def forward(self, x):
         if self.centroids:
-            return self._compute_closest_centroids(x)  
+            centroids, idcs = self._compute_closest_centroids(x)
+            return centroids, idcs
         elif self.model is None:
             return x
         else:
-            return self.model.encode_only(x)[0]
+            return self.model.encode_only(x)[:2]
 
     def _compute_closest_centroids(self, x):
-        return torch.argmin((self.model[None,...] - x[:,None]).pow(2).sum(-1),-1)
+        idcs = torch.argmin((self.model[None,...] - x[:,None]).pow(2).sum(-1),-1)
+        centroids = self.model[idcs]
+
+        return centroids, idcs
 
     @property
     def trainable_params(self):
@@ -117,11 +127,13 @@ class VectorQuantizer(nn.Module):
 
 class ActionQuantizer(VectorQuantizer):
     def __init__(self, model_path=None, action_centroids=True):
-        super().__init__(ActionVQVAE, model_path)
+        if not action_centroids:
+            raise NotImplementedError
+        super().__init__(ActionVQVAE, model_path, action_centroids)
         
 class VecobsQuantizer(VectorQuantizer):
     def __init__(self, model_path=None, vecobs_centroids=False):
-        super().__init__(VecObsVQVAE, model_path)
+        super().__init__(VecObsVQVAE, model_path, vecobs_centroids)
     
 
 class OfflineQLearner(pl.LightningModule):
@@ -167,50 +179,78 @@ class OfflineQLearner(pl.LightningModule):
 
         q_net_input_dim = pov_features.shape[-1] + self.action_dim + self.vecobs_dim
         self.q_net = nn.Sequential(
-            nn.Linear(q_net_input_dim, 1),
+            nn.Linear(q_net_input_dim, 512),
             nn.GELU(),
+            nn.Linear(512, 128),
+            nn.GELU(),
+            nn.Linear(128, self.action_quantizer.num_actions),
         )
+
+        #self._update_target()
+
+    def _update_target(self):
+        self.target_net = nn.ModuleDict({
+            'pov_feature_extractor':deepcopy(self.pov_feature_extractor),
+            'action_quantizer':deepcopy(self.action_quantizer),
+            'vecobs_quantizer':deepcopy(self.vecobs_quantizer),
+            'q_net':deepcopy(self.q_net)
+        })
+        self.target_net.eval()
 
     def _sub_batch_processing(self, pov_obs, vec_obs, actions):
         # preprocess
         pov_features = self.pov_feature_extractor(pov_obs)
         vec_obs = self.vecobs_quantizer(vec_obs)
-        actions = self.action_quantizer(actions)
+        action_quants, action_idcs = self.action_quantizer(actions)
 
         # stack inputs
-        q_net_input = torch.cat([pov_features, vec_obs, actions], dim=1)
+        q_net_input = torch.cat([pov_features, vec_obs, action_quants], dim=1)
 
         # predict q values
         predicted_q_values = self.q_net(q_net_input)
         
-        return predicted_q_values
+        return predicted_q_values, action_idcs
     
     def forward(self, pov_obs, vec_obs, actions):
         predicted_q_values = []
+        all_action_idcs = []
         for i in range((len(pov_obs) - 1) // self.hparams.max_batch_size + 1):
             start = i * self.hparams.max_batch_size
             stop = (i + 1) * self.hparams.max_batch_size
-            predicted_q_values.append(self._sub_batch_processing(
+            q_values, action_idcs = self._sub_batch_processing(
                 pov_obs[start:stop],
                 vec_obs[start:stop],
                 actions[start:stop],
-            ))
-        return torch.cat(predicted_q_values, dim=0)
+            )
+            predicted_q_values.append(q_values)
+            all_action_idcs.append(action_idcs)
+        return torch.cat(predicted_q_values, dim=0), torch.cat(all_action_idcs, dim=0)
             
     def training_step(self, batch, batch_idx):
         # unpack batch
         pov_obs, vec_obs, actions, rew = batch
         
-        targets = self.compute_q_values(rew)
-        print(f'{targets = }')
-        print(f'{rew = }')
-        predicted_q_values = self.forward(pov_obs, vec_obs, actions).squeeze()
-        
-        loss = nn.MSELoss(reduction='mean')(predicted_q_values, targets)
-        self.log('Training/loss', loss, on_step=True)
+        rew = torch.log2(1 + rew) / 8
 
-        self.logger.experiment.add_histogram('Training/Predicted_Q', predicted_q_values, self.global_step)
-        self.logger.experiment.add_histogram('Training/True_Q', targets, self.global_step)
+        targets = self.compute_q_values(rew)
+        #print(f'{targets = }')
+        print(f'{rew = }')
+        predicted_q_values, action_idcs = self.forward(pov_obs, vec_obs, actions)
+        print(f'{predicted_q_values.shape = }')
+        print(f'{action_idcs.shape = }')
+        
+        # TODO:
+        # compute 1-step and n-step loss instead of episodic?
+
+        large_margin_loss = self._large_margin_classification_loss(predicted_q_values, action_idcs)
+        return_loss = nn.MSELoss(reduction='mean')(predicted_q_values[torch.arange(0,len(predicted_q_values),1,dtype=torch.long), action_idcs], targets)
+        loss = large_margin_loss + return_loss
+        self.log('Training/loss', loss, on_step=True)
+        self.log('Training/return_loss', return_loss, on_step=True)
+        self.log('Training/large_margin_loss', large_margin_loss, on_step=True)
+
+        #self.logger.experiment.add_histogram('Training/Predicted_Q', predicted_q_values, self.global_step)
+        #self.logger.experiment.add_histogram('Training/True_Q', targets, self.global_step)
 
         """
         figure = plt.figure()
@@ -245,6 +285,8 @@ class OfflineQLearner(pl.LightningModule):
         '''
         Computes the large margin classification loss J_E(Q) from the DQfD paper
         '''
+        print(f'{q_values.shape = }')
+        print(f'{expert_action.shape = }')
         idcs = torch.arange(0,len(q_values),dtype=torch.long)
         q_values = q_values + self.hparams.margin
         q_values[idcs, expert_action] = q_values[idcs,expert_action] - self.hparams.margin
@@ -261,8 +303,6 @@ def main(
     save_freq,
     lr,
     discount_factor,
-    load_from_checkpoint,
-    version,
     epochs,
     action_quantizer_version,
     vecobs_quantizer_version,
@@ -280,7 +320,7 @@ def main(
 
     # set up model    
     if action_quantizer_version is None:
-        action_quantizer_path = os.path.join(data_dir, env_name+'_centroids_'+str(action_num_centroids)+'.npy')
+        action_quantizer_path = os.path.join(data_dir, env_name+'_'+str(action_num_centroids)+'_centroids.npy')
         centroids = True
     else:
         action_quantizer_path = os.path.join(log_dir, 'ActionVQVAE', env_name, 'lightning_logs', 'version_'+str(action_quantizer_version), 'checkpoints', 'last.ckpt')
@@ -332,8 +372,6 @@ if __name__ == '__main__':
     parser.add_argument('--lr', default=3e-4, type=float)
     parser.add_argument('--discount_factor', default=0.99, type=float)
     parser.add_argument('--margin', default=0.8, type=float)
-    parser.add_argument('--load_from_checkpoint', action='store_true')
-    parser.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--epochs', default=2, type=int)
     parser.add_argument('--action_quantizer_version', default=None, type=int, help='Version of action quantizer')
     parser.add_argument('--action_num_centroids', default=150, type=int, help='Number of clusters for actions, if using kmeans instead of vqvae')

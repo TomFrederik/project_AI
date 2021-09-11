@@ -62,7 +62,7 @@ class VQVAE(pl.LightningModule):
     def forward(self, x):
         z = self.encoder(self.recon_loss.inmap(x))
         z_q, latent_loss, ind, _ = self.quantizer(z)
-        x_hat = self.decoder(z_q)
+        x_hat = self.recon_loss.unmap(self.decoder(z_q))
         return x_hat, latent_loss, ind
 
     
@@ -111,7 +111,6 @@ class VQVAE(pl.LightningModule):
         self.log('Training/loss', loss, on_step=True)
         self.log('Training/recon_loss', recon_loss, on_step=True)
         self.log('Training/latent_loss', latent_loss, on_step=True)
-        self.log('Training/pseudo_bpd', loss / (64*64*3) * np.log2(np.exp(1)), on_step=True)
         if self.hparams.log_perplexity:
             if (self.global_step + 1) % self.hparams.perplexity_freq == 0:
                 self.eval()
@@ -261,7 +260,7 @@ def cli_main():
     # training related
     parser = pl.Trainer.add_argparse_args(parser)
     # model type
-    parser.add_argument("--vq_flavor", type=str, default='vqvae', choices=['vqvae', 'gumbel'])
+    parser.add_argument("--vq_flavor", type=str, default='gumbel', choices=['vqvae', 'gumbel'])
     parser.add_argument("--enc_dec_flavor", type=str, default='deepmind', choices=['deepmind', 'openai'])
     parser.add_argument("--loss_flavor", type=str, default='l2', choices=['l2', 'logit_laplace'])
     parser.add_argument('--callback_batch_size', type=int, default=6, help='How many images to reconstruct for callback (shown in tensorboard/images)')
@@ -270,8 +269,8 @@ def cli_main():
     parser.add_argument('--log_freq', type=int, default=10)
     parser.add_argument('--progbar_rate', type=int, default=10)
     # model size
-    parser.add_argument("--num_embeddings", type=int, default=512, help="vocabulary size; number of possible discrete states")
-    parser.add_argument("--embedding_dim", type=int, default=192, help="size of the vector of the embedding of each discrete token")
+    parser.add_argument("--num_embeddings", type=int, default=32, help="vocabulary size; number of possible discrete states")
+    parser.add_argument("--embedding_dim", type=int, default=32, help="size of the vector of the embedding of each discrete token")
     parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
 # dataloader related
     parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data')
@@ -314,7 +313,7 @@ def cli_main():
 
     # annealing schedules for lots of constants
     callbacks = []
-    callbacks.append(ModelCheckpoint(monitor='loss', mode='min', save_last=True, every_n_train_steps=args.save_freq))
+    callbacks.append(ModelCheckpoint(monitor='Training/loss', mode='min', save_last=True, every_n_train_steps=args.save_freq))
     # create callbacks to sample reconstructed images
     callbacks.append(
         GenerateCallback(
