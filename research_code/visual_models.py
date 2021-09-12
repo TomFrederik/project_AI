@@ -55,9 +55,14 @@ class VAE(pl.LightningModule):
             std
             sample - tensor of shape (B, L), where L is the latent dimension
         '''
+        b, *_ = x.shape
         mean, log_std = self.encoder(x-0.5)
-        sample = self.sample(mean, log_std)
+        h = int((mean.shape[0]//b) ** 0.5)
+        
+        mean = einops.rearrange(mean, '(b h w) c -> b c h w', b=b, h=h, w=h)
+        log_std = einops.rearrange(log_std, '(b h w) c -> b c h w', b=b, h=h, w=h)
 
+        sample = self.sample(mean, log_std)
         return mean, torch.exp(log_std), sample
 
     @torch.no_grad()

@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import torchvision as tv
 
+from visual_models import VAE
+from vqvae import VQVAE
 
 STR_TO_MODEL = {
-    'rssm':dynamics_models.RSSM,
-    'node':dynamics_models.NODEDynamicsModel,
     'mdn':dynamics_models.MDN_RNN
 }
 
@@ -29,7 +29,7 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # load model
-    model = STR_TO_MODEL[model_class].load_from_checkpoint(model_path).to(device)
+    model: dynamics_models.MDN_RNN = STR_TO_MODEL[model_class].load_from_checkpoint(model_path).to(device)
 
     # load a single trajectory
     env = data.make(env_name, data_dir)
@@ -62,8 +62,13 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
 
     # encode pov
     #print(pov.shape)
-    enc_pov, _, log_priors = model.VAE.encode_only(pov)
-    rec_pov = model.VAE.decode_only(enc_pov).detach()
+    if isinstance(model.VAE, VQVAE):
+        enc_pov, _, log_priors = model.VAE.encode_only(pov)
+        rec_pov = model.VAE.decode_only(enc_pov).detach()
+    elif isinstance(model.VAE, VAE):
+        mean, std, sample = model.VAE.encode_only(pov)
+    else:
+        raise NotImplementedError
 
     # prepare model input
     states = enc_pov
@@ -83,72 +88,6 @@ def load_model_and_eval(model_path, model_class, env_name, data_dir, save_path):
     pred_pov[:,:,0,0] = torch.zeros_like(pred_pov[:,:,0,0])
     pred_pov[:,0,0,0] = torch.ones_like(pred_pov[:,0,0,0])
 
-    '''
-    # plot difference between predicted and true vector obs
-    all_data = (pred_vec - following_vecs).abs().detach()
-    baseline = (vec[-1][None,:] - following_vecs).abs().detach().cpu().numpy()
-    #idcs = torch.argsort(all_data.mean(dim=-1), descending=False)
-    #print(idcs.shape)
-    #pred_pov = pred_pov[idcs]
-    #print(pred_pov.shape)
-    #all_data = all_data[idcs].cpu().numpy()
-    all_data = all_data.cpu().numpy()
-    
-    #baseline[baseline == 0] += 1e-15
-    #all_data[all_data == 0] += 1e-15
-    #for i in range(len(following_vecs)):
-    #    print(following_vecs[i,:5])
-    
-    ydata = all_data[0]
-    ydata.sort()
-    baseline_ydata = baseline[0]
-    baseline_ydata.sort()
-    
-    fig = plt.figure()
-    ax = plt.axes()
-    plot = ax.plot(ydata, color='r', label='Model Error')[0]
-    ax.set_ylim(0, all_data.max())
-    
-    plt.legend()
-    def animate(i):
-        ydata = all_data[i]
-        ydata.sort()
-        plot.set_ydata(ydata)
-    
-    anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
-    plt.draw()
-    anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_model_{model_class}.mp4'))
-
-    fig = plt.figure()
-    ax = plt.axes()
-    #print(baseline.max())
-    baseline_plot = ax.plot(baseline_ydata, color='g', label='Baseline Error')[0]
-    ax.set_ylim(0, baseline.max())
-    
-    plt.legend()
-    def animate(i):
-        baseline_ydata = baseline[i]
-        baseline_ydata.sort()
-        baseline_plot.set_ydata(baseline_ydata)
-    
-    anim = FuncAnimation(fig, animate, interval=100, frames=num_steps-1, )
-    plt.draw()
-    anim.save(os.path.join(save_path, 'dynamics_imgs', f'vec_diff_baseline_{model_class}.mp4'))
-    '''
-
-    '''
-    # match povs
-    diff = ((pred_pov - following_povs)**2).mean(dim=[1,2,3]).cpu().numpy()
-    #print(f'diff.shape = {diff.shape}')
-    plt.figure()
-    plt.plot(diff)
-    plt.ylim(diff.min(), diff.max())
-    plt.savefig(os.path.join(save_path,'dynamics_imgs',f'{model_class}_pov_diff.png'))
-    plt.close()
-    
-    pov_idcs = torch.argsort(diff, dim=0)[0,:]
-    pred_pov = pred_pov[pov_idcs]
-    '''
     # visualize predicted pov and actual next frames
     images = []
     for i in range(len(pov)):
