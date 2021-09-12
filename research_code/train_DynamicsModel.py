@@ -24,7 +24,7 @@ STR_TO_MODEL = {
     'mdn':dynamics_models.MDN_RNN
 }
 
-class GenerateCallback(pl.Callback):
+class PredictionCallback(pl.Callback):
 
     def __init__(self, every_n_epochs=1, dataset=None, every_n_batches=100, seq_len=10):
         """
@@ -77,11 +77,21 @@ class GenerateCallback(pl.Callback):
         # predict sequence
         _, pov_sample_list, _ = pl_module.forward(*self.sequence)
         
-        # reconstruct images
-        images = torch.stack([self.img_batch, reconstructed_img], dim=1).reshape((self.batch_size * 2, *self.img_batch.shape[1:]))
+        if pl_module.hparams.VAE_class == 'vqvae':
+            print('WARNING: VQVAE reconstruction not implemented')
+        
+        else:
+            # predict with Conv and RNN
+            pov_samples = [pov_sample_list[i][0][0] for i in range(len(pov_sample_list))]
+            pov_samples = torch.stack(pov_samples, dim=0)
+            
+            pov_reconstruction = pl_module.VAE.decode_only(pov_samples)
+            
+            # reconstruct images
+            images = torch.stack([self.sequence[0], pov_reconstruction], dim=1).reshape((self.sequence[0].shape[0] * 2, 3, 64, 64))
 
-        # log images to tensorboard
-        trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
+            # log images to tensorboard
+            trainer.logger.experiment.add_image('Prediction', make_grid(images, nrow=2), epoch)
 
 
 def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
@@ -173,10 +183,16 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     print(f'num val samples = {len(val_data)}')
 
     model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+    prediction_callback = PredictionCallback(
+        every_n_batches=save_freq,
+        dataset=val_data,
+        seq_len=10
+    )
+    callbacks = [model_checkpoint, prediction_callback]
     trainer=pl.Trainer(
         progress_bar_refresh_rate=1, #every N batches update progress bar
         log_every_n_steps=1,
-        callbacks=[model_checkpoint],
+        callbacks=callbacks,
         gpus=torch.cuda.device_count(),
         accelerator='dp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
