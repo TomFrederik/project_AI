@@ -62,7 +62,6 @@ class MDN_RNN(pl.LightningModule):
         
         # load VAE
         self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
-        #self.VAE.eval()
         
         if self.hparams.VAE_class == 'vqvae':
             self.latent_dim = self.VAE.hparams.args.embedding_dim
@@ -79,108 +78,49 @@ class MDN_RNN(pl.LightningModule):
                 )
                 # init the new part of the embedding with N(0,1)
                 nn.init.normal_(self.embedding.weight[:,self.latent_dim:], mean=0.0, std=1.0)
-                #self.embedding = nn.Embedding(num_embeddings=self.num_embeddings, embedding_dim=self.latent_dim)
 
-            dummy, dummy_idcs, _ = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))
-            if self.hparams.predict_idcs_directly and self.hparams.embed:
-                dummy = einops.rearrange(self.embedding(dummy_idcs), 'b h w D -> b D h w')
-            self.latent_h = dummy.shape[-1]
-            self.latent_size = np.prod(dummy.shape[2:])
-            
-            conv_net = True
-            if conv_net:
-                num_channels = dummy.shape[1]
-                self.conv_net = nn.Sequential(
-                    nn.Conv2d(in_channels=num_channels, out_channels=256, kernel_size=3, padding=1, stride=2), # 16 -> 8
-                    nn.GELU(),
-                    nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2), # 8 -> 4
-                    nn.GELU(),
-                    nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=3, padding=1, stride=2), # 4 -> 2
-                    nn.GELU(),
-                    nn.Conv2d(in_channels=1024, out_channels=2048, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
-                    #nn.GELU()
-                )
-                print('\nUsing conv net')
-                dummy = self.conv_net(dummy)
-                self.pre_gru_size = np.prod(dummy.shape[2:])
-                self.pre_gru_channels = dummy.shape[1]
-                print(f'\npre_gru_size (H*W) = {self.pre_gru_size}')
-            
-            else:
-                print('\nNot using conv net')
-                self.conv_net = None
-                self.pre_gru_channels = self.latent_size
-                self.pre_gru_size = self.latent_dim
-                
-            print(f'\nlatent_size (H*W) = {self.latent_size}')
-    
         elif self.hparams.VAE_class == 'vae':
             self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
             print(f'\nlatent_dim = {self.latent_dim}')
-
-            dummy_mean, dummy_std, dummy_sample = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))
-            print(f'{dummy_sample.shape = }')
-            self.latent_h = dummy_sample.shape[-1]
-            self.latent_size = np.prod(dummy_sample.shape[2:])
             
-            conv_net = True
-            if conv_net:
-                num_channels = dummy_sample.shape[1]
-                self.conv_net = nn.Sequential(
-                    nn.Conv2d(in_channels=num_channels, out_channels=64, kernel_size=3, padding=1, stride=2), # 16 -> 8
-                    nn.GELU(),
-                    nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1, stride=2), # 8 -> 4
-                    nn.GELU(),
-                    nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1, stride=2), # 4 -> 2
-                    nn.GELU(),
-                    nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
-                )
-                print('\nUsing conv net')
-                dummy = self.conv_net(dummy_sample)
-                self.pre_gru_size = np.prod(dummy.shape[2:])
-                self.pre_gru_channels = dummy.shape[1]
-                print(f'\npre_gru_size (H*W) = {self.pre_gru_size}')
+        dummy_sample, *_ = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))
+        print(f'{dummy_sample.shape = }')
+        self.latent_h = dummy_sample.shape[-1]
+        self.latent_size = np.prod(dummy_sample.shape[2:])
+                
+        num_channels = dummy_sample.shape[1]
+        self.conv_net = nn.Sequential(
+                nn.Conv2d(in_channels=num_channels, out_channels=64, kernel_size=3, padding=1, stride=2), # 16 -> 8
+                nn.GELU(),
+                nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1, stride=2), # 8 -> 4
+                nn.GELU(),
+                nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1, stride=2), # 4 -> 2
+                nn.GELU(),
+                nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
+            )
         
-        '''
-        dummy_sample.requires_grad = False
-        print(dummy_sample.requires_grad)
-        dummy = self.conv_net(dummy_sample)
-        loss = dummy.sum()
-        loss.backward()
-        print(self.conv_net[2].weight.grad[0,0,0,0])
-        raise ValueError
-        '''
+        dummy_sample = self.conv_net(dummy_sample)
+        self.pre_gru_size = np.prod(dummy_sample.shape[2:])
+        self.pre_gru_channels = dummy_sample.shape[1]
+        print(f'\npre_gru_size (H*W) = {self.pre_gru_size}')
+        print(f'\nlatent_size (H*W) = {self.latent_size}')
+        
         # set up model
         gru_input_dim = self.pre_gru_channels * self.pre_gru_size + 64
         self.gru = nn.GRU(**gru_kwargs, input_size=gru_input_dim, batch_first=True)
-        
-        if self.hparams.VAE_class == 'vqvae':
-            self.mdn_network = nn.Sequential(
-                nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=1024, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
-                nn.GELU(),
-                nn.ConvTranspose2d(in_channels=1024, out_channels=512, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
-                nn.GELU(),
-                nn.ConvTranspose2d(in_channels=512, out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 4 -> 8
-                nn.GELU(),
-                nn.ConvTranspose2d(
-                    in_channels=256, out_channels=self.num_embeddings if self.hparams.predict_idcs_directly else self.latent_dim, 
-                    kernel_size=3, padding=1, stride=2, output_padding=1
-                    )  # 8 -> 16
-            )
-            
-        else:
-            self.mdn_network = nn.Sequential(
-                nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
-                nn.GELU(),
-                nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
-                nn.GELU(),
-                nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=3, padding=1, stride=2, output_padding=1), # 4 -> 8
-                nn.GELU(),
-                nn.ConvTranspose2d(
-                    in_channels=64, out_channels=self.latent_dim, 
-                    kernel_size=3, padding=1, stride=2, output_padding=1
-                    )  # 8 -> 16
-            )
+
+        self.mdn_network = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=3, padding=1, stride=2, output_padding=1), # 4 -> 8
+            nn.GELU(),
+            nn.ConvTranspose2d(
+                in_channels=64, out_channels=self.num_embeddings if (self.hparams.predict_idcs_directly and self.hparams.VAE_class == 'vqvae') else self.latent_dim, 
+                kernel_size=3, padding=1, stride=2, output_padding=1
+                )  # 8 -> 16
+        )
 
     def _step(self, batch):
         # unpack batch
@@ -194,7 +134,6 @@ class MDN_RNN(pl.LightningModule):
             loss = 0
             T = self.hparams.seq_len-1
             loss_list = []
-            entropy_list = []
             for t in range(T):
                 cur_pov_target = target['pov'][:,t]
 
@@ -205,14 +144,8 @@ class MDN_RNN(pl.LightningModule):
                 cur_pov_target = einops.repeat(cur_pov_target, 'b latent_size -> b latent_size t', t=pov_logits.shape[-1])
                 cur_loss = nn.CrossEntropyLoss()(pov_logits, cur_pov_target)
 
-                # compute entropy for logging
-                #probs = torch.softmax(-pov_dist, dim=1)
-                #entropy = - (probs * torch.log(probs)).sum(dim=1).mean()
-                entropy = 0
                 loss += cur_loss/T
                 loss_list.append(cur_loss)
-                entropy_list.append(entropy)
-                #print(f'loss.shape = {loss.shape}')
         
         elif self.hparams.VAE_class == 'vae':
             pov_mean_list, pov_sample_list, target = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
@@ -221,40 +154,20 @@ class MDN_RNN(pl.LightningModule):
             loss = 0
             T = self.hparams.seq_len-1
             loss_list = []
-            entropy_list = []
             for t in range(T):
-                cur_pov_target = target['pov'][:,t]
-
+                cur_target_mean = target['pov'][:,t]
                 pov_mean = pov_mean_list[t]
+
                 # target is the ground truth state at time t, which should be compared to prediction which started from time t
-                pov_mean = einops.rearrange(pov_mean, 'b t c h w -> b c (h w) t')
-                cur_target_mean = einops.repeat(cur_pov_target, 'b c hw -> b c hw t', t=pov_mean.shape[-1])
-                #print(f'{pov_mean[0] = }')
-                #print(f'{cur_target_mean[0] = }')
-                # cheat for now
-                #print(f'{pov_log_std[0] = }')
-                #print(f'{cur_target_log_std[0] = }')
-                # compute KL divergence
                 cur_loss = (pov_mean - cur_target_mean).pow(2).mean()
 
                 # compute entropy for logging
-                #probs = torch.softmax(-pov_dist, dim=1)
-                #entropy = - (probs * torch.log(probs)).sum(dim=1).mean()
-                entropy = 0
                 loss += cur_loss/T
                 loss_list.append(cur_loss)
-                entropy_list.append(entropy)
-                #print(f'loss.shape = {loss.shape}')
         
-        return loss, loss_list, entropy_list
-    '''
-    def on_after_backward(self):
-        print(f'{self.conv_net[2].weight.grad.pow(2).sum() = }')
-        print(f'{self.gru.weight_hh_l0.grad.pow(2).sum() = }')
-        print(f'{self.mdn_network[0].weight.grad.pow(2).sum() = }')
-    '''
+        return loss, loss_list
 
-    def forward(self, pov, vec, actions, h0=None, latent_overshooting=False):
+    def forward(self, pov, vec, actions, last_hidden=None, latent_overshooting=False):
         '''
         Given a sequence of pov, vec and actions, computes priors over next latent
         state.
@@ -262,54 +175,54 @@ class MDN_RNN(pl.LightningModule):
             pov - ([B], T, 3, 64, 64)
             vec - ([B], T, 64)
             actions - ([B], T, 64)
-            h0 - ([B], lstm_kwargs['hidden_size'],)
-            latent_overshooting - Bool, whether to use latent overshooting
+            last_hidden - ([B], gru_kwargs['hidden_size'],), potential last hidden state of the recurrent network
+            latent_overshooting - Bool, whether to use latent overshooting, i.e. extrapolating more than one step
         Output:
-            pov_dist_list - List, pov_dist_list[t] contains predictions of the pov distribution
-                            at time t, starting from different states previous to t
+            pov_logits_list or pov_mean_list - List of logits or means of the state at time t
+            pov_sample_list - List of samples at time timesteps t
             target - ([B], T-1, latent_dim + vec_dim) sample of ground truth encoding
         '''
+        # save shape params
+        B, T = pov.shape[:2]
         
-        last_hidden = h0
-
-        # merge frames with batch
-        b = pov.shape[0]
-        seq_len = pov.shape[1]
+        # merge frames with batch for batch processing
         pov = einops.rearrange(pov, 'b t c h w -> (b t) c h w')
         
         # encode pov to latent
         if self.hparams.VAE_class == 'vqvae':
-            #print(f'pov.shape = {pov.shape}')
             pov_sample, ind, log_priors = self.VAE.encode_only(pov)
             if self.hparams.embed:
                 pov_sample = einops.rearrange(self.embedding(ind), 'bt h w D -> bt D h w')
             log_priors = einops.rearrange(log_priors, '(b t) D h w -> b t D h w', t=self.hparams.seq_len)
-            #print(f'log_priors.shape = {log_priors.shape}')
             one_step_priors = einops.rearrange(log_priors[:,:-1], 'b t D h w -> (b t h w) D')    
             ind = einops.rearrange(ind, 'bt h w -> bt (h w)')
             ind = einops.rearrange(ind, '(b t) hw -> b t hw', b=b)[:,self.hparams.conditioning_len:]
-        elif self.hparams.VAE_class == 'vae':
-            # to do it like in paper, we just use a sample as target
-            mean, _, pov_sample = self.VAE.encode_only(pov) 
-
-        pov_sample = einops.rearrange(pov_sample, '(b t) c h w -> b t c h w', t=self.hparams.seq_len+self.hparams.conditioning_len)
-        states = einops.rearrange(pov_sample[:,self.hparams.conditioning_len:], 'b t c h w -> b t c (h w)')
-        actions = actions[:,self.hparams.conditioning_len:]
+            pov_sample = einops.rearrange(pov_sample, '(b t) c h w -> b t c h w', t=self.hparams.seq_len+self.hparams.conditioning_len)
+            states = einops.rearrange(pov_sample[:,self.hparams.conditioning_len:], 'b t c h w -> b t c (h w)')
         
-        # stack pov and vec to construct target
-        if self.hparams.VAE_class == 'vqvae':
             target = {
                 'pov': ind[:,1:]
                 #'vec': vec[:,1:]
             }
+            
         elif self.hparams.VAE_class == 'vae':
-            target_mean = einops.rearrange(mean, '(b t) c h w -> b t c (h w)', b=b)[:,1:]
+            # the std in the VAE latent is always very close to 1, 
+            # so sample doesn't give additional info over mean
+            mean, _, _ = self.VAE.encode_only(pov) 
+            mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', b=B)
+            target_mean = mean[:,1:]
             target = {
                 'pov': target_mean
             }
             
+            input_states = einops.rearrange(mean[:,:-1], 'b t c h w -> (b t) c h w')
+            
+        actions = actions[:,self.hparams.conditioning_len:]
+                 
         # condition on previous sequence to prime the RNN
         if self.hparams.conditioning_len > 0:
+            raise NotImplementedError
+            '''
             if self.hparams.predict_idcs_directly:
                 raise NotImplementedError
             if self.conv_net is None:
@@ -324,10 +237,10 @@ class MDN_RNN(pl.LightningModule):
                     hidden_seq, last_hidden = self.gru(gru_input)
                 else:
                     hidden_seq, last_hidden = self.gru(gru_input, last_hidden)
+            '''
 
         pov_logits_list = []
         pov_mean_list = []
-        pov_log_std_list = []
         pov_sample_list = []
         
         # compute one-step predictions
@@ -335,17 +248,15 @@ class MDN_RNN(pl.LightningModule):
             pov_logits, sample, hidden_seq = self.one_step_prediction(states[:,:-1], actions[:,:-1], last_hidden, one_step_priors)
             pov_logits_list.extend([[pov_logits[:,i]] for i in range(pov_logits.shape[1])])
         else:
-            mean_prior = einops.rearrange(mean, '(b t) c h w -> b t c h w', b=b)[:,self.hparams.conditioning_len:-1]
-            states = einops.rearrange(mean_prior, 'b t c h w -> b t c (h w)')
-            mean, sample, hidden_seq = self.one_step_prediction(states, actions[:,:-1], last_hidden, mean_prior)
+            mean, sample, hidden_seq = self.one_step_prediction(input_states, actions[:,:-1], last_hidden)
             pov_mean_list.extend([[mean[:,i]] for i in range(mean.shape[1])])
         
         # save sample to list
         pov_sample_list.extend([[sample[:,i]] for i in range(sample.shape[1])])
-
         
         # latent overshooting
         if latent_overshooting and self.curriculum[self.curriculum_step] > 0:
+            raise NotImplementedError
             # extrapolate/imagine from each state
             for t in range(self.hparams.seq_len-2):
                 time1 = time()
@@ -388,47 +299,33 @@ class MDN_RNN(pl.LightningModule):
             
     def one_step_prediction(self, states, actions, h0=None, log_prior=None):
         '''
-        Helper function which takes (a sample of the current belief over the) current state or a sequence thereof,
-        the action taken in that state or states, as well as the current lstm state and computes a belief
-        over the next state
+        Helper function which takes a sequence of states and the action taken in each state.
+        Optionally also takes the last RNN state and prior over next state.
+        Computes the belief over the next state
         Input:
-            states - ([B], T, 64 + latent_dim)
-            actions - ([B], T, 64)
-            h0 - ([B], lstm_kwargs['hidden_size'],)
+            states - (B, T, latent_dim, H, W)
+            actions - (B, T, 64)
+            h0 - (B, lstm_kwargs['hidden_size'],)
             log_prior
         Output:
-            pov_dist - distribution over the next latent space
-            s_t -  sample from the above distribution
-            (h_t, c_t) - hidden and cell state of the lstm after each time step (if stepwise, otherwise only after the last step)
+            pov_logits or mean - distribution over the next latent space or the mean of the next latent state
+            state -  sample from the above distribution
+            hidden_state_seq - hidden states of the RNN after each time step
         '''
-        # concat states and action
-        seq_len = states.shape[1]
-        if self.conv_net is not None:
-            new_states = self.conv_net(einops.rearrange(states, 'b t c (h w) -> (b t) c h w', h=self.latent_h))
-            new_states = einops.rearrange(new_states, '(b t) c h w -> b t (c h w)', t=seq_len)
-        else:
-            new_states = einops.rearrange(states, 'b t c hw -> b t (c hw)')
+        # save T for later
+        T = states.shape[1]
+        
+        # distill states with conv net
+        conv_out = einops.rearrange(self.conv_net(states), '(b t) c h w -> b t (c h w)', t=T)
+
         # compute hidden states of gru
         if h0 is None:
-            hidden_states_seq, _ = self.gru(torch.cat([new_states, actions], dim=2))
+            hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2))
         else:
-            hidden_states_seq, _ = self.gru(torch.cat([new_states, actions], dim=2), h0)
-
+            hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2), h0)
 
         # compute next state
         pov_pred = self.mdn_network(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d 1 1'))
-        
-        '''
-        if self.global_step == 1:
-            print(pov_pred.requires_grad)
-            loss = pov_pred.pow(2).sum()
-            print(f'{loss.item() = }')
-            loss.backward()
-            print(f'{self.conv_net[2].weight.grad[0,0,0,0] = }')
-            print(f'{self.gru.weight_hh_l0.grad[0,0] = }')
-            print(f'{self.mdn_network[0].weight.grad[0,0,0] = }')
-            raise ValueError
-        '''
 
         if self.hparams.VAE_class == 'vqvae':
             pov_logits = einops.rearrange(pov_pred, 'bt embedding_dim h w -> (bt h w) embedding_dim') # embedding_dim or num_embeddings
@@ -445,16 +342,14 @@ class MDN_RNN(pl.LightningModule):
             return pov_logits, state, hidden_states_seq
         
         elif self.hparams.VAE_class == 'vae':
-            #TODO: currently only implicitly using the prior mean and std in the mdn-rnn, but not updating/skip connection
-            
-            # generate mean and log_std from mdn-rnn output
+            # mean == pov_pred
             mean = pov_pred
-
-            mean = einops.rearrange(mean, '(b t) D h w -> b t D h w', t=seq_len)
-            #print(f'{mean[0,0,0,0] = }')
-
+            
             # skip connection for mean
-            #mean = mean + log_prior
+            #mean = mean + states
+            
+            # rearrange
+            mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', t=T)
 
             # sample state
             state = mean + torch.normal(torch.zeros_like(mean), torch.ones_like(mean))
@@ -587,9 +482,7 @@ class MDN_RNN(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # perform predictions and compute loss
-        loss, loss_list, entropy_list = self._step(batch)
-        #loss_z, loss_v = self._step(batch)
-        #loss = loss_z #+ loss_v # TODO re-enable v-loss backprop
+        loss, loss_list = self._step(batch)
         # score and log predictions
         self.log('Training/loss', loss, on_step=True)
         
@@ -598,15 +491,11 @@ class MDN_RNN(pl.LightningModule):
         plt.xlabel('Frame')
         plt.ylabel('Loss')
         self.trainer.logger.experiment.add_figure('Training/loss_per_frame', figure, self.global_step)
-        #self.log('Training/loss_z', loss_z, on_step=True)
-        #self.log('Training/loss_v', loss_v, on_step=True)
         return loss
         
     def validation_step(self, batch, batch_idx):
         # perform predictions and compute loss
         loss, loss_list, entropy_list = self._step(batch)
-        #loss_z, loss_v = self._step(batch)
-        #loss = loss_z #+ loss_v # TODO re-enable v-loss backprop
         # score and log predictions
         self.log('Validation/loss', loss, on_epoch=True)
     
@@ -615,15 +504,14 @@ class MDN_RNN(pl.LightningModule):
         plt.xlabel('Frame')
         plt.ylabel('Loss')
         self.trainer.logger.experiment.add_figure('Validation/loss_per_frame', figure, self.global_step)
-        
-        #self.log('Validation/loss_z', loss_z, on_epoch=True)
-        #self.log('Validation/loss_v', loss_v, on_epoch=True)
         return loss
     
     def validation_epoch_end(self, batch_losses):
-        # check whether to go to next step in curriculum
-        mean_loss = torch.tensor(batch_losses).mean()
-        self._check_curriculum_cond(mean_loss)
+        # check whether to go to next step in curriculum, 
+        # but only if latent overshooting is active
+        if self.hparams.latent_overshooting:
+            mean_loss = torch.tensor(batch_losses).mean()
+            self._check_curriculum_cond(mean_loss)
     
     def configure_optimizers(self):
         # set up optimizer

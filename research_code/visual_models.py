@@ -63,7 +63,7 @@ class VAE(pl.LightningModule):
         log_std = einops.rearrange(log_std, '(b h w) c -> b c h w', b=b, h=h, w=h)
 
         sample = self.sample(mean, log_std)
-        return mean, torch.exp(log_std), sample
+        return sample, mean, torch.exp(log_std)
 
     @torch.no_grad()
     def decode_only(self, z):

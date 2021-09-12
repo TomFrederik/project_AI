@@ -7,7 +7,6 @@ from torchvision.utils import make_grid
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.plugins import DeepSpeedPlugin, DeepSpeedPrecisionPlugin
 
 
 import numpy as np
