@@ -43,7 +43,6 @@ class MDN_RNN(pl.LightningModule):
         num_components, 
         VAE_path, 
         VAE_class='vae', 
-        latent_overshooting=False,
         temp=1, 
         conditioning_len=0,
         curriculum_threshold=3.0, 
@@ -128,7 +127,7 @@ class MDN_RNN(pl.LightningModule):
 
         # make predictions
         if self.hparams.VAE_class == 'vqvae':
-            pov_logits_list, pov_sample_list, target = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
+            pov_logits_list, pov_sample_list, target = self(pov, vec, actions)
 
             # Compute loss over all time horizons
             loss = 0
@@ -148,7 +147,7 @@ class MDN_RNN(pl.LightningModule):
                 loss_list.append(cur_loss)
         
         elif self.hparams.VAE_class == 'vae':
-            pov_mean_list, pov_sample_list, target = self(pov, vec, actions, latent_overshooting=self.hparams.latent_overshooting)
+            pov_mean_list, pov_sample_list, target = self(pov, vec, actions)
         
             # Compute loss over all time horizons
             loss = 0
@@ -167,7 +166,20 @@ class MDN_RNN(pl.LightningModule):
         
         return loss, loss_list
 
-    def forward(self, pov, vec, actions, last_hidden=None, latent_overshooting=False):
+    def forward(self, pov, vec, actions):
+        '''
+        Given a sequence, chops it into smaller subsequences and forwards each individually.
+        Gradients are blocked between subsequences to make it less memory intensive.
+        pov - (T, 3, 64, 64)
+        vec - (T, 64)
+        actions - (T, 64)
+        '''
+        self.max_seq_len = 300 #TODO put this somewhere else
+        #TODO
+        
+        
+        
+    def subsequence_forward(self, pov, vec, actions, last_hidden=None):
         '''
         Given a sequence of pov, vec and actions, computes priors over next latent
         state.
@@ -176,7 +188,6 @@ class MDN_RNN(pl.LightningModule):
             vec - ([B], T, 64)
             actions - ([B], T, 64)
             last_hidden - ([B], gru_kwargs['hidden_size'],), potential last hidden state of the recurrent network
-            latent_overshooting - Bool, whether to use latent overshooting, i.e. extrapolating more than one step
         Output:
             pov_logits_list or pov_mean_list - List of logits or means of the state at time t
             pov_sample_list - List of samples at time timesteps t
@@ -199,7 +210,6 @@ class MDN_RNN(pl.LightningModule):
             ind = einops.rearrange(ind, '(b t) hw -> b t hw', b=b)[:,self.hparams.conditioning_len:]
             pov_sample = einops.rearrange(pov_sample, '(b t) c h w -> b t c h w', t=self.hparams.seq_len+self.hparams.conditioning_len)
             states = einops.rearrange(pov_sample[:,self.hparams.conditioning_len:], 'b t c h w -> b t c (h w)')
-        
             target = {
                 'pov': ind[:,1:]
                 #'vec': vec[:,1:]
@@ -246,56 +256,10 @@ class MDN_RNN(pl.LightningModule):
         # compute one-step predictions
         if self.hparams.VAE_class == 'vqvae':
             pov_logits, sample, hidden_seq = self.one_step_prediction(states[:,:-1], actions[:,:-1], last_hidden, one_step_priors)
-            pov_logits_list.extend([[pov_logits[:,i]] for i in range(pov_logits.shape[1])])
+            return pov_logits, pov_sample, target
         else:
             mean, sample, hidden_seq = self.one_step_prediction(input_states, actions[:,:-1], last_hidden)
-            pov_mean_list.extend([[mean[:,i]] for i in range(mean.shape[1])])
-        
-        # save sample to list
-        pov_sample_list.extend([[sample[:,i]] for i in range(sample.shape[1])])
-        
-        # latent overshooting
-        if latent_overshooting and self.curriculum[self.curriculum_step] > 0:
-            raise NotImplementedError
-            # extrapolate/imagine from each state
-            for t in range(self.hparams.seq_len-2):
-                time1 = time()
-                cur_actions = actions[:,1+t:]
-                starting_state = states[:,1+t]
-                h_0 = hidden_seq[:,t,:]
-                
-                if self.hparams.VAE_class == 'vqvae':
-                    log_prior = einops.rearrange(log_priors[:,1+t], 'b D h w -> (b h w) D')
-                    extrapolated_states, extrapolated_pov_logits = self.extrapolate_latent(starting_state, cur_actions, h_0, log_prior)
-                    # save results to lists
-                    for i in range(extrapolated_states.shape[1]):
-                        pov_logits_list[t+1+i].append(extrapolated_pov_logits[:,i])
-                        pov_sample_list[t+1+i].append(extrapolated_states[:,i])
-
-                elif self.hparams.VAE_class == 'vae':
-                    #TODO log_prior = (mean, log_std)
-                    raise NotImplementedError
-                    extrapolated_states, (extrapolated_pov_mean, extrapolated_pov_log_std) = self.extrapolate_latent(starting_state, cur_actions, h_0, log_prior)
-                    # save results to lists
-                    for i in range(extrapolated_states.shape[1]):
-                        pov_mean_list[t+1+i].append(extrapolated_pov_mean[:,i])
-                        pov_sample_list[t+1+i].append(extrapolated_states[:,i])
-
-                print(f'Time in extrapolate latent, t={t}: {time()-time1:.3f}s')
-        
-        # stack lists into tensors
-        if self.hparams.VAE_class == 'vqvae':
-            for i in range(len(pov_sample_list)):
-                pov_logits_list[i] = torch.stack(pov_logits_list[i], dim=1)
-                pov_sample_list[i] = torch.stack(pov_sample_list[i], dim=1)
-            
-            return pov_logits_list, pov_sample_list, target
-        elif self.hparams.VAE_class == 'vae':
-            for i in range(len(pov_sample_list)):
-                pov_mean_list[i] = torch.stack(pov_mean_list[i], dim=1)
-                pov_sample_list[i] = torch.stack(pov_sample_list[i], dim=1)
-            
-            return pov_mean_list, pov_sample_list, target
+            return pov_mean, pov_sample, target
             
     def one_step_prediction(self, states, actions, h0=None, log_prior=None):
         '''
@@ -355,91 +319,6 @@ class MDN_RNN(pl.LightningModule):
             state = mean + torch.normal(torch.zeros_like(mean), torch.ones_like(mean))
             
             return mean, state, hidden_states_seq
-
-    def extrapolate_latent(self, state, actions, h0=None, log_prior=None):
-        '''
-        Extrapolate from starting state conditional on actions and pre-existing lstm states
-        Args:
-            state - ([B], 64 + latent_dim)
-            actions - ([B], T', 64), where T' is the number of steps the function will extrapolate
-        Returns:
-            extrapolated_states - ([B], T', num_components * (64 + latent_dim))
-            extrapolated_pov_dist - ([B], T', num_components * (64 + latent_dim))
-        '''
-        if h0 is not None:
-            h_n = h0[None,:].contiguous()
-        else:
-            h_n = h0
-        #print(f'h_n.shape = {h_n.shape}')
-
-        steps = min(self.curriculum[self.curriculum_step], actions.shape[1]-1)
-        b = state.shape[0]
-        
-        extrapolated_states = []
-        extrapolated_pov_logits = []
-        extrapolated_pov_means = []
-        extrapolated_pov_log_stds = []
-                
-        for t in range(steps):
-            if self.conv_net is not None:
-                new_state = self.conv_net(einops.rearrange(state, 'b c (h w) -> b c h w', h=self.latent_h))
-                new_state = einops.rearrange(new_state, 'b c h w -> b (c h w)')
-
-            if t == 0 and self.conv_net is None:
-                new_state = einops.rearrange(new_state, 'b embed_dim latent_size -> b (embed_dim latent_size)')
-            
-            _, h_n = self.gru(torch.cat([new_state, actions[:,t]], dim=1)[:,None], h_n)
-            
-            # compute next state
-            pov_pred = self.mdn_network(einops.rearrange(h_n[0], 'b d -> b d 1 1'))
-
-            pov_pred = einops.rearrange(pov_pred, '(b t) embedding_dim h w -> b t embedding_dim (h w)', t=1) # embedding_dim or num_embeddings
-            if self.hparams.VAE_class == 'vqvae':
-                pov_logits = einops.rearrange(pov_pred, 'bt embedding_dim h w -> (bt h w) embedding_dim') # embedding_dim or num_embeddings
-                # skip connection / update priors over discrete embedding vectors
-                if log_prior is not None:
-                    pov_logits += log_prior
-                one_hot_ind = nn.functional.gumbel_softmax(pov_logits, dim=-1, tau=self.hparams.temp, hard=True)
-                state = self.VAE.quantizer.embed_one_hot(one_hot_ind)
-            
-                pov_logits = einops.rearrange(pov_logits, '(b latent_size) num_embeds -> b num_embeds latent_size', latent_size=self.latent_size)
-                state = einops.rearrange(state, '(b latent_size) embed_dim -> b embed_dim latent_size', latent_size=self.latent_size)
-                
-                if log_prior is not None:
-                    log_prior = einops.rearrange(pov_logits, 'b num_embeds latent_size -> (b latent_size) num_embeds')
-            
-                if self.hparams.predict_idcs_directly and self.hparams.embed:
-                    state = one_hot_ind @ self.embedding.weight
-                    state = einops.rearrange(state, '(b latent_size) embed_dim -> b embed_dim latent_size', latent_size=self.latent_size)
-
-                extrapolated_pov_logits.append(pov_logits)
-            elif self.hparams.VAE_class == 'vae':
-                #TODO: currently only implicitly using the prior mean and std in the mdn-rnn, but not updating/skip connection
-                
-                # generate mean and log_std from mdn-rnn output
-                mean, log_std = torch.chunk(pov_pred, chunks=2, dim=1)
-
-                # skip connection for mean
-                mean += log_prior[0]
-
-                # sample state
-                state = mean + torch.exp(log_std) * torch.normal(torch.zeros_like(mean), torch.ones_like(log_std))
-                
-                extrapolated_pov_means.append(mean)
-                extrapolated_pov_log_stds.append(log_std)
-            
-            extrapolated_states.append(state)
-        
-        # stack the outputs and return
-        extrapolated_states = torch.stack(extrapolated_states, dim=1)
-        if self.hparams.VAE_class == 'vqvae':
-            extrapolated_pov_logits = torch.stack(extrapolated_pov_logits, dim=1)    
-            return extrapolated_states, extrapolated_pov_logits
-        
-        elif self.hparams.VAE_class == 'vae':
-            extrapolated_pov_log_stds = torch.stack(extrapolated_pov_log_stds, dim=1)
-            extrapolated_pov_means = torch.stack(extrapolated_pov_means, dim=1)
-            return extrapolated_states, (extrapolated_pov_means, extrapolated_pov_log_stds)
         
     @torch.no_grad()
     def predict_recursively(self, states, actions, horizon, log_priors):
@@ -509,9 +388,12 @@ class MDN_RNN(pl.LightningModule):
     def validation_epoch_end(self, batch_losses):
         # check whether to go to next step in curriculum, 
         # but only if latent overshooting is active
+        '''
         if self.hparams.latent_overshooting:
             mean_loss = torch.tensor(batch_losses).mean()
             self._check_curriculum_cond(mean_loss)
+        '''
+        pass
     
     def configure_optimizers(self):
         # set up optimizer

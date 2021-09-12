@@ -99,7 +99,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
                         model_path, VAE_class, vae_version, num_components,
                         val_check_interval, load_from_checkpoint, version,
-                        latent_overshooting, profile, temp,
+                        profile, temp,
                         conditioning_len, curriculum_threshold, curriculum_start,
                         predict_idcs_directly, embed, save_freq):
     
@@ -148,7 +148,6 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'VAE_path':vae_path,
             'num_components':num_components,
             'temp':temp,
-            'latent_overshooting':latent_overshooting,
             'conditioning_len':conditioning_len,
             'curriculum_threshold':curriculum_threshold,
             'curriculum_start':curriculum_start,
@@ -225,7 +224,7 @@ if __name__=='__main__':
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--load_from_checkpoint', action='store_true')
-    parser.add_argument('--latent_overshooting', action='store_true')
+    #parser.add_argument('--latent_overshooting', action='store_true')
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--embed', action='store_true')
     parser.add_argument('--predict_idcs_directly', action='store_true', help='Whether to predict embedding idcs directly or predict vectors which are then mapped to their closes idx')
