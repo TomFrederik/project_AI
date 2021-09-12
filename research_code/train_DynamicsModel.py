@@ -19,16 +19,15 @@ torch.autograd.set_detect_anomaly(True)
 
 STR_TO_MODEL = {
     'rssm':dynamics_models.RSSM,
-    'node':dynamics_models.NODEDynamicsModel,
     'mdn':dynamics_models.MDN_RNN
 }
 
 def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
                         val_perc, batch_size, num_data, epochs, 
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
-                        model_path, VAE_class, num_components, skip_connection,
-                        val_check_interval, load_from_checkpoint, version_dir,
-                        latent_overshooting, soft_targets, profile, temp, regression,
+                        model_path, VAE_class, num_components,
+                        val_check_interval, load_from_checkpoint, version,
+                        latent_overshooting, profile, temp,
                         conditioning_len, curriculum_threshold, curriculum_start,
                         predict_idcs_directly, embed):
     
@@ -42,22 +41,9 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     optim_kwargs = {'lr':lr}
     scheduler_kwargs = {'lr_gamma':lr_gamma, 'lr_decrease_freq':lr_decrease_freq, 'lr_step_mode':lr_step_mode}
     
-    if dynamics_model == 'node':
-        seq_len = seq_len
-        hidden_dims = [512,512,512]
-        base_model_class = dynamics_models.DynamicsBaseModel
-        base_model_kwargs = {'input_dim':256, 'hidden_dims':hidden_dims}
-        
-        model_kwargs = {
-            'base_model_class':base_model_class, 
-            'base_model_kwargs':base_model_kwargs, 
-            'seq_len':seq_len, 
-            'VAE_path':model_path,
-            'optim_kwargs':optim_kwargs,
-            'scheduler_kwargs':scheduler_kwargs
-        }
-        monitor = 'Validation/loss'
-    elif dynamics_model == 'rssm':
+    if dynamics_model == 'rssm':
+        raise NotImplementedError
+        """
         seq_len = seq_len        
         lstm_kwargs = {'num_layers':1, 'hidden_size':2048}
         model_kwargs = {
@@ -70,6 +56,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'latent_overshooting':latent_overshooting
         }
         monitor = 'Validation/loss'
+        """
     elif dynamics_model == 'mdn':
         seq_len = seq_len        
         gru_kwargs = {'num_layers':1, 'hidden_size':1024}
@@ -82,9 +69,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'VAE_class':VAE_class,
             'num_components':num_components,
             'temp':temp,
-            'skip_connection':skip_connection,
             'latent_overshooting':latent_overshooting,
-            'soft_targets':soft_targets,
             'conditioning_len':conditioning_len,
             'curriculum_threshold':curriculum_threshold,
             'curriculum_start':curriculum_start,
@@ -98,7 +83,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     
     # init model
     if load_from_checkpoint:
-        checkpoint = os.path.join(version_dir, 'checkpoints', 'last.ckpt')
+        checkpoint = os.path.join(log_dir, 'lightning_logs', 'version_'+str(version), 'checkpoints', 'last.ckpt')
         
         print(f'\nLoading model from {checkpoint}')
         model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, **model_kwargs)
@@ -121,7 +106,6 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
 
     model_checkpoint = ModelCheckpoint(save_weights_only=True, mode="min", monitor=monitor, save_last=True)
     trainer=pl.Trainer(
-                    precision=32, #32 is normal, 16 is mixed precision
                     progress_bar_refresh_rate=1, #every N batches update progress bar
                     log_every_n_steps=10,
                     callbacks=[model_checkpoint],
@@ -131,7 +115,6 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                     val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
                     max_epochs=epochs
                 )
-    trainer.logger._default_hp_metric = None # optional logging metric that we don't need right now
     trainer.fit(model, train_loader, val_loader)
 
 if __name__=='__main__':
@@ -151,22 +134,19 @@ if __name__=='__main__':
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--VAE_class', type=str, default='Conv', choices=['Conv', 'ResNet', 'vqvae'])
+    parser.add_argument('--VAE_class', type=str, default='vae', choices=['vae' 'vqvae'])
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
-    parser.add_argument('--skip_connection', action='store_true', help='Whether to use skip connection in MDN-RNN.')
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--latent_overshooting', action='store_true')
-    parser.add_argument('--soft_targets', action='store_true')
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--embed', action='store_true')
     parser.add_argument('--predict_idcs_directly', action='store_true', help='Whether to predict embedding idcs directly or predict vectors which are then mapped to their closes idx')
-    parser.add_argument('--regression', action='store_true', help='Whether to perform regression or KL minimization')
     parser.add_argument('--temp', default=1, type=float)
     parser.add_argument('--curriculum_threshold', default=3, type=float)
     parser.add_argument('--curriculum_start', default=0, type=int)
     parser.add_argument('--conditioning_len', default=0, type=int, help='Length of sequence to condition rnn on')
-    parser.add_argument('--version_dir', default='', type=str, help='Version directory of model, if training is resumed from checkpoint')
+    parser.add_argument('--version', default=0, type=int, help='Version directory of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())
 

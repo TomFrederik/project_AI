@@ -228,9 +228,6 @@ class DynamicsData(Dataset):
         return pov, vec_obs, act, rew
 
 
-
-
-
 class PretrainQNetIterableData(IterableDataset):
     def __init__(self, env_name, data_dir, centroids, n_step, gamma, num_workers):
         super().__init__()
