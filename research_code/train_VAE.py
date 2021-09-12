@@ -89,13 +89,6 @@ class GenerateCallback(pl.Callback):
             pl_module - The VAE model that is currently being trained.
             epoch - The epoch number to use for TensorBoard logging and saving of the files.
         """
-        # Hints:
-        # - You can access the logging directory path via trainer.logger.log_dir, and
-        # - You can access the tensorboard logger via trainer.logger.experiment
-        # - Use the torchvision function "make_grid" to create a grid of multiple images
-        # - Use the torchvision function "save_image" to save an image grid to disk 
-
-        #x_samples, x_mean = pl_module.sample(self.batch_size)
         
         if self.img_batch.device != pl_module.device:
             self.img_batch = self.img_batch.to(pl_module.device)

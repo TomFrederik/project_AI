@@ -13,6 +13,8 @@ import numpy as np
 from time import time
 import os
 import argparse
+import einops
+
 
 # for debugging
 torch.autograd.set_detect_anomaly(True)
@@ -21,6 +23,66 @@ STR_TO_MODEL = {
     'rssm':dynamics_models.RSSM,
     'mdn':dynamics_models.MDN_RNN
 }
+
+class GenerateCallback(pl.Callback):
+
+    def __init__(self, every_n_epochs=1, dataset=None, every_n_batches=100, seq_len=10):
+        """
+        Inputs:
+            every_n_epochs - Only save those images every N epochs
+            dataset - Dataset to sample from
+            save_to_disk - If True, the samples and image means should be saved to disk as well.
+            every_n_batches - Only save those images every N batches
+            seq_len - maximum seq len of the sample, if dataset only contains shorter samples then that is the maximum seq len instead
+        """
+        super().__init__()
+        self.every_n_epochs = every_n_epochs
+        self.every_n_batches = every_n_batches
+
+        #x_samples, x_mean = pl_module.sample(self.batch_size)
+        pov, vec_obs, act, _ = map(lambda x: x[:seq_len], dataset[0])
+        pov = torch.from_numpy(einops.rearrange(pov, 't c h w -> 1 t c h w')).float() / 255
+        vec = torch.from_numpy(einops.rearrange(vec_obs, 't d -> 1 t d'))
+        act = torch.from_numpy(einops.rearrange(act, 't d -> 1 t d'))
+        self.sequence = (pov, vec, act)
+
+    def on_epoch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (trainer.current_epoch+1) % self.every_n_epochs == 0:
+            self.predict_sequence(trainer, pl_module, trainer.current_epoch+1)
+    
+    def on_batch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (pl_module.global_step+1) % self.every_n_batches == 0:
+            self.predict_sequence(trainer, pl_module, pl_module.global_step+1)
+
+    def predict_sequence(self, trainer, pl_module: dynamics_models.MDN_RNN, epoch):
+        """
+        Function that predicts sequence and generates images.
+        Inputs:
+            trainer - The PyTorch Lightning "Trainer" object.
+            pl_module - The VAE model that is currently being trained.
+            epoch - The epoch number to use for TensorBoard logging and saving of the files.
+        """
+        # make sure sequence is on correct device
+        if self.sequence[0].device != pl_module.device:
+            self.sequence = map(lambda x: x.to(pl_module.device), self.sequence)
+        
+        # predict sequence
+        _, pov_sample_list, _ = pl_module.forward(*self.sequence)
+        
+        # reconstruct images
+        images = torch.stack([self.img_batch, reconstructed_img], dim=1).reshape((self.batch_size * 2, *self.img_batch.shape[1:]))
+
+        # log images to tensorboard
+        trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
+
 
 def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
                         val_perc, batch_size, num_data, epochs, 
@@ -65,7 +127,6 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         monitor = 'Validation/loss'
         """
     elif dynamics_model == 'mdn':
-        seq_len = seq_len        
         gru_kwargs = {'num_layers':1, 'hidden_size':256}
         model_kwargs = {
             'gru_kwargs':gru_kwargs, 
@@ -92,9 +153,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
     # init model
     if load_from_checkpoint:
         checkpoint = os.path.join(log_dir, 'lightning_logs', 'version_'+str(version), 'checkpoints', 'last.ckpt')
-        
         print(f'\nLoading model from {checkpoint}')
-        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint, **model_kwargs)
+        model = STR_TO_MODEL[dynamics_model].load_from_checkpoint(checkpoint)
     else:
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
@@ -114,16 +174,16 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
 
     model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
     trainer=pl.Trainer(
-                    progress_bar_refresh_rate=1, #every N batches update progress bar
-                    log_every_n_steps=1,
-                    callbacks=[model_checkpoint],
-                    gpus=torch.cuda.device_count(),
-                    accelerator='dp', #anything else here seems to lead to crashes/errors
-                    default_root_dir=log_dir,
-                    val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
-                    max_epochs=epochs,
-                    track_grad_norm=2,
-                )
+        progress_bar_refresh_rate=1, #every N batches update progress bar
+        log_every_n_steps=1,
+        callbacks=[model_checkpoint],
+        gpus=torch.cuda.device_count(),
+        accelerator='dp', #anything else here seems to lead to crashes/errors
+        default_root_dir=log_dir,
+        val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
+        max_epochs=epochs,
+        track_grad_norm=2,
+    )
     trainer.fit(model, train_loader, val_loader)
 
 if __name__=='__main__':
