@@ -38,13 +38,13 @@ class PredictionCallback(pl.Callback):
         super().__init__()
         self.every_n_epochs = every_n_epochs
         self.every_n_batches = every_n_batches
-        self.seq_len = seq_len
 
         #x_samples, x_mean = pl_module.sample(self.batch_size)
-        pov, vec_obs, act, _ = map(lambda x: x[:,:seq_len], next(iter(dataset)))
+        pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iter(dataset))[:-1])
         pov = torch.from_numpy(pov)
         vec = torch.from_numpy(vec_obs)
         act = torch.from_numpy(act)
+        self.seq_len = seq_len = pov.shape[1]
         self.sequence = (pov, vec, act)
 
     def on_epoch_end(self, trainer, pl_module):
@@ -168,7 +168,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
 
     # load data
     train_data = datasets.DynamicsData(env_name, data_dir, seq_len + conditioning_len, batch_size)
-    train_loader = DataLoader(train_data, batch_size=None, num_workers=1, pin_memory=True)
+    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
 
     model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
     prediction_callback = PredictionCallback(
@@ -185,7 +185,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         accelerator='dp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
         max_epochs=epochs,
-        #track_grad_norm=2,
+        track_grad_norm=2,
     )
     trainer.fit(model, train_loader)
 

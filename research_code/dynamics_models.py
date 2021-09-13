@@ -105,8 +105,30 @@ class MDN_RNN(pl.LightningModule):
         print(f'\nlatent_size (H*W) = {self.latent_size}')
         
         # set up model
-        gru_input_dim = self.pre_gru_channels * self.pre_gru_size + 64
-        self.gru = nn.GRU(**gru_kwargs, input_size=gru_input_dim, batch_first=True)
+        self.gru_input_dim = self.pre_gru_channels * self.pre_gru_size + 64
+        self.gru = nn.GRU(**gru_kwargs, input_size=self.gru_input_dim, batch_first=True)
+
+
+        # test whether weight_hh_l0 has gradients. It has gradients.
+        """
+        B = 1000
+        T = 3
+        D_in = self.gru_input_dim
+        D_out = gru_kwargs['hidden_size']
+        input_tensor = torch.ones((B,T,D_in), requires_grad=True, device='cuda')
+        h_0 = torch.ones((1,B,D_out), requires_grad=False, device='cuda')
+
+        output1, _ = self.gru(input_tensor)
+        loss1 = output1.pow(2).sum()
+        loss1.backward()
+        print(self.gru.weight_hh_l0.grad)
+
+        output2, _ = self.gru(input_tensor, h_0)
+        loss2 = output2.pow(2).sum()
+        loss2.backward()
+        print(self.gru.weight_hh_l0.grad)
+        raise ValueError
+        """
 
         self.mdn_network = nn.Sequential(
             nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
@@ -171,7 +193,7 @@ class MDN_RNN(pl.LightningModule):
         '''
         # save shape params
         B, T = pov.shape[:2]
-        
+
         # merge frames with batch for batch processing
         pov = einops.rearrange(pov, 'b t c h w -> (b t) c h w')
         
@@ -203,8 +225,6 @@ class MDN_RNN(pl.LightningModule):
             
             input_states = mean[:,:-1]
             
-        actions = actions[:,self.hparams.conditioning_len:]
-                 
         # condition on previous sequence to prime the RNN
         if self.hparams.conditioning_len > 0:
             raise NotImplementedError
@@ -225,10 +245,6 @@ class MDN_RNN(pl.LightningModule):
                     hidden_seq, last_hidden = self.gru(gru_input, last_hidden)
             '''
 
-        pov_logits_list = []
-        pov_mean_list = []
-        pov_sample_list = []
-        
         # compute one-step predictions
         if self.hparams.VAE_class == 'vqvae':
             pov_logits, sample, hidden_seq = self.one_step_prediction(states[:,:-1], actions[:,:-1], last_hidden, one_step_priors)
@@ -257,8 +273,10 @@ class MDN_RNN(pl.LightningModule):
         
         # distill states with conv net
         conv_out = einops.rearrange(self.conv_net(einops.rearrange(states, 'b t c h w -> (b t) c h w')), '(b t) c h w -> b t (c h w)', t=T)
-
+        
         # compute hidden states of gru
+        #print(f'{conv_out = }')
+        #print(f'{actions = }')
         if h0 is None:
             hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2))
         else:
@@ -287,7 +305,7 @@ class MDN_RNN(pl.LightningModule):
             
             # rearrange
             mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', t=T)
-            print(mean)
+            #print(mean[0,0,:,0,0])
             
             # skip connection for mean
             #mean = mean + states

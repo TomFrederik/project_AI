@@ -270,7 +270,7 @@ class DynamicsData(IterableDataset):
             pov, vec, act, rew = self.buffer.popleft()
 
             # add a batch dimension        
-            yield pov[None], vec[None], act[None], rew[None]
+            yield pov, vec, act, rew
     
     def __iter__(self):
         return self._iterator()
