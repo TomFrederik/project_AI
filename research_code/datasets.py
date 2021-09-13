@@ -253,12 +253,13 @@ class DynamicsData(IterableDataset):
     
     def _iterator(self):
         cur_name_idx = 0
-        while cur_name_idx < len(self.names):
+        # yield as long as there are samples in the buffer or new samples that can still be loaded
+        while len(self.buffer) > 0 or cur_name_idx < len(self.names):            
             # load a new trajectory when the buffer is running out
-            if len(self.buffer) < self.batch_size:
-                self._load_new_traj(self.names[cur_name_idx]))
+            if len(self.buffer) < self.batch_size and cur_name_idx < len(self.names):
+                self._load_new_traj(self.names[cur_name_idx])
                 cur_name_idx += 1
-            
+        
             # get a new sample from buffer and yield it
             pov, vec, act, rew = self.buffer.popleft()
         
