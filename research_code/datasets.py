@@ -10,6 +10,7 @@ import einops
 from random import shuffle
 from itertools import chain
 from collections import deque
+from time import time
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
         'MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0']
@@ -236,11 +237,16 @@ class DynamicsData(IterableDataset):
         shuffle(self.names)
         
     def _load_new_traj(self, name):
-        obs, act, rew, _ = zip(*self.pipeline.load_data(name))
-        pov = einops.rearrange(obs['pov'].astype(np.float32), 't h w c -> t c h w') / 255
-        vec = obs['vector'].astype(np.float32)
-        act = act['vector'].astype(np.float32)
-        rew = rew.astype(np.float32)
+        obs, act, rew, *_ = zip(*self.pipeline.load_data(name))
+        
+        pov, vec = zip(*[(o['pov'], o['vector']) for o in obs])
+        pov = np.stack(pov)
+        vec = np.stack(vec)
+
+        pov = einops.rearrange(pov.astype(np.float32), 't h w c -> t c h w') / 255
+        vec = vec.astype(np.float32)
+        act = np.stack([a['vector'] for a in act]).astype(np.float32)
+        rew = np.array([r for r in rew]).astype(np.float32)
         
         start_idcs = [len(obs) % self.seq_len + self.seq_len * i for i in range(len(obs)//self.seq_len)]
         pov_list = [pov[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
@@ -260,10 +266,11 @@ class DynamicsData(IterableDataset):
                 self._load_new_traj(self.names[cur_name_idx])
                 cur_name_idx += 1
         
-            # get a new sample from buffer and yield it
+            # get a new sample from buffer
             pov, vec, act, rew = self.buffer.popleft()
-        
-            yield pov, vec, act, rew
+
+            # add a batch dimension        
+            yield pov[None], vec[None], act[None], rew[None]
     
     def __iter__(self):
         return self._iterator()

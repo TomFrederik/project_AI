@@ -147,24 +147,13 @@ class MDN_RNN(pl.LightningModule):
                 loss_list.append(cur_loss)
         
         elif self.hparams.VAE_class == 'vae':
-            pov_mean_list, pov_sample_list, target = self(pov, vec, actions)
+            pov_mean, pov_sample, target = self(pov, vec, actions)
         
-            # Compute loss over all time horizons
-            loss = 0
-            T = self.hparams.seq_len-1
-            loss_list = []
-            for t in range(T):
-                cur_target_mean = target['pov'][:,t]
-                pov_mean = pov_mean_list[t]
+            target_mean = target['pov']
 
-                # target is the ground truth state at time t, which should be compared to prediction which started from time t
-                cur_loss = (pov_mean - cur_target_mean).pow(2).mean()
-
-                # compute entropy for logging
-                loss += cur_loss/T
-                loss_list.append(cur_loss)
+            loss = (pov_mean - target_mean).pow(2).mean()
         
-        return loss, loss_list
+        return loss
     
     def forward(self, pov, vec, actions, last_hidden=None):
         '''
@@ -212,7 +201,7 @@ class MDN_RNN(pl.LightningModule):
                 'pov': target_mean
             }
             
-            input_states = einops.rearrange(mean[:,:-1], 'b t c h w -> (b t) c h w')
+            input_states = mean[:,:-1]
             
         actions = actions[:,self.hparams.conditioning_len:]
                  
@@ -245,7 +234,7 @@ class MDN_RNN(pl.LightningModule):
             pov_logits, sample, hidden_seq = self.one_step_prediction(states[:,:-1], actions[:,:-1], last_hidden, one_step_priors)
             return pov_logits, pov_sample, target
         else:
-            mean, sample, hidden_seq = self.one_step_prediction(input_states, actions[:,:-1], last_hidden)
+            pov_mean, pov_sample, hidden_seq = self.one_step_prediction(input_states, actions[:,:-1], last_hidden)
             return pov_mean, pov_sample, target
             
     def one_step_prediction(self, states, actions, h0=None, log_prior=None):
@@ -267,7 +256,7 @@ class MDN_RNN(pl.LightningModule):
         T = states.shape[1]
         
         # distill states with conv net
-        conv_out = einops.rearrange(self.conv_net(states), '(b t) c h w -> b t (c h w)', t=T)
+        conv_out = einops.rearrange(self.conv_net(einops.rearrange(states, 'b t c h w -> (b t) c h w')), '(b t) c h w -> b t (c h w)', t=T)
 
         # compute hidden states of gru
         if h0 is None:
@@ -287,20 +276,21 @@ class MDN_RNN(pl.LightningModule):
             # sample next state
             one_hot_ind = nn.functional.gumbel_softmax(pov_logits, dim=-1, tau=self.hparams.temp, hard=True)
             state = self.VAE.quantizer.embed_one_hot(one_hot_ind)
-            state = einops.rearrange(state, '(b t latent_size) embed_dim -> b t embed_dim latent_size', latent_size=self.latent_size, t=seq_len)
+            state = einops.rearrange(state, '(b t latent_size) embed_dim -> b t embed_dim latent_size', latent_size=self.latent_size, t=T)
         
-            pov_logits = einops.rearrange(pov_logits, '(b t latent_size) num_embeds -> b t num_embeds latent_size', t=seq_len, latent_size=self.latent_size)
+            pov_logits = einops.rearrange(pov_logits, '(b t latent_size) num_embeds -> b t num_embeds latent_size', t=T, latent_size=self.latent_size)
             return pov_logits, state, hidden_states_seq
         
         elif self.hparams.VAE_class == 'vae':
             # mean == pov_pred
             mean = pov_pred
             
-            # skip connection for mean
-            #mean = mean + states
-            
             # rearrange
             mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', t=T)
+            print(mean)
+            
+            # skip connection for mean
+            #mean = mean + states
 
             # sample state
             state = mean + torch.normal(torch.zeros_like(mean), torch.ones_like(mean))
@@ -348,15 +338,10 @@ class MDN_RNN(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # perform predictions and compute loss
-        loss, loss_list = self._step(batch)
+        loss= self._step(batch)
         # score and log predictions
         self.log('Training/loss', loss, on_step=True)
         
-        figure = plt.figure()
-        plt.plot(np.arange(1,len(loss_list)+1,1), torch.tensor(loss_list).detach().cpu().numpy())
-        plt.xlabel('Frame')
-        plt.ylabel('Loss')
-        self.trainer.logger.experiment.add_figure('Training/loss_per_frame', figure, self.global_step)
         return loss
         
     def validation_epoch_end(self, batch_losses):

@@ -38,12 +38,13 @@ class PredictionCallback(pl.Callback):
         super().__init__()
         self.every_n_epochs = every_n_epochs
         self.every_n_batches = every_n_batches
+        self.seq_len = seq_len
 
         #x_samples, x_mean = pl_module.sample(self.batch_size)
-        pov, vec_obs, act, _ = map(lambda x: x[:seq_len], next(dataset))
-        pov = torch.from_numpy(einops.rearrange(pov, 't c h w -> 1 t c h w')).float() / 255
-        vec = torch.from_numpy(einops.rearrange(vec_obs, 't d -> 1 t d'))
-        act = torch.from_numpy(einops.rearrange(act, 't d -> 1 t d'))
+        pov, vec_obs, act, _ = map(lambda x: x[:,:seq_len], next(iter(dataset)))
+        pov = torch.from_numpy(pov)
+        vec = torch.from_numpy(vec_obs)
+        act = torch.from_numpy(act)
         self.sequence = (pov, vec, act)
 
     def on_epoch_end(self, trainer, pl_module):
@@ -72,23 +73,21 @@ class PredictionCallback(pl.Callback):
         """
         # make sure sequence is on correct device
         if self.sequence[0].device != pl_module.device:
-            self.sequence = map(lambda x: x.to(pl_module.device), self.sequence)
+            self.sequence = list(map(lambda x: x.to(pl_module.device), self.sequence))
         
         # predict sequence
-        _, pov_sample_list, _ = pl_module.forward(*self.sequence)
+        _, pov_samples, _ = pl_module.forward(*self.sequence)
         
         if pl_module.hparams.VAE_class == 'vqvae':
             print('WARNING: VQVAE reconstruction not implemented')
         
         else:
+            pov_samples = einops.rearrange(pov_samples, 'b t c h w -> (b t h w) c')
             # predict with Conv and RNN
-            pov_samples = [pov_sample_list[i][0][0] for i in range(len(pov_sample_list))]
-            pov_samples = torch.stack(pov_samples, dim=0)
-            
             pov_reconstruction = pl_module.VAE.decode_only(pov_samples)
-            
+
             # reconstruct images
-            images = torch.stack([self.sequence[0], pov_reconstruction], dim=1).reshape((self.sequence[0].shape[0] * 2, 3, 64, 64))
+            images = torch.stack([self.sequence[0][0,1:], pov_reconstruction], dim=1).reshape(((self.seq_len -1) * 2, 3, 64, 64))
 
             # log images to tensorboard
             trainer.logger.experiment.add_image('Prediction', make_grid(images, nrow=2), epoch)
@@ -186,7 +185,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         accelerator='dp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
         max_epochs=epochs,
-        track_grad_norm=2,
+        #track_grad_norm=2,
     )
     trainer.fit(model, train_loader)
 
@@ -194,7 +193,7 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--model_path', help='Path to encoding model')
-    parser.add_argument('--data_dir', default="/home/lieberummaas/datadisk/minerl/data/numpy_data")
+    parser.add_argument('--data_dir', default="/home/lieberummaas/datadisk/minerl/data")
     parser.add_argument('--log_dir', default="/home/lieberummaas/datadisk/minerl/run_logs")
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
     parser.add_argument('--dynamics_model', default='mdn', choices=['rssm', 'mdn'], help='Model used to predict the next latent state')

@@ -169,4 +169,5 @@ class VAEDecoder(nn.Module):
         )
 
     def forward(self, x):
+        print(x.shape)
         return self.net(x)
