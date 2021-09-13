@@ -9,6 +9,7 @@ import random
 import einops
 from random import shuffle
 from itertools import chain
+from collections import deque
 
 ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVectorObf-v0',
         'MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0']
@@ -155,13 +156,10 @@ class RewardData(IterableDataset):
         yield vec_obs, rew
 
 
+'''
 class DynamicsData(Dataset):
 
     def __init__(self, env_name, data_dir, seq_len=4, num_data=0):
-        '''
-        Will load seq_len sequences, first for input, rest as target
-        longer seq len doesn't make sense since it would need to know the actions at each timestept too
-        '''
 
         super().__init__()
 
@@ -226,6 +224,49 @@ class DynamicsData(Dataset):
         rew = self.rewards[idx].astype(np.float32)
 
         return pov, vec_obs, act, rew
+'''
+
+class DynamicsData(IterableDataset):
+    def __init__(self, env_name, data_dir, seq_len, batch_size):
+        self.seq_len = seq_len
+        self.batch_size = batch_size
+        self.pipeline = minerl.data.make(env_name, data_dir)
+        self.buffer = deque([])
+        self.names = list(self.pipeline.get_trajectory_names())
+        shuffle(self.names)
+        
+    def _load_new_traj(self, name):
+        obs, act, rew, _ = zip(*self.pipeline.load_data(name))
+        pov = einops.rearrange(obs['pov'].astype(np.float32), 't h w c -> t c h w') / 255
+        vec = obs['vector'].astype(np.float32)
+        act = act['vector'].astype(np.float32)
+        rew = rew.astype(np.float32)
+        
+        start_idcs = [len(obs) % self.seq_len + self.seq_len * i for i in range(len(obs)//self.seq_len)]
+        pov_list = [pov[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
+        vec_list = [vec[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
+        act_list = [act[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
+        rew_list = [rew[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
+    
+        self.buffer.extend(zip(pov_list, vec_list, act_list, rew_list))
+        shuffle(self.buffer)
+    
+    def _iterator(self):
+        cur_name_idx = 0
+        while cur_name_idx < len(self.names):
+            # load a new trajectory when the buffer is running out
+            if len(self.buffer) < self.batch_size:
+                self._load_new_traj(self.names[cur_name_idx]))
+                cur_name_idx += 1
+            
+            # get a new sample from buffer and yield it
+            pov, vec, act, rew = self.buffer.popleft()
+        
+            yield pov, vec, act, rew
+    
+    def __iter__(self):
+        return self._iterator()
+
 
 class PretrainQNetIterableData(IterableDataset):
     def __init__(self, env_name, data_dir, centroids, n_step, gamma, num_workers):

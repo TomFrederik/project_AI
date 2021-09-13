@@ -165,21 +165,8 @@ class MDN_RNN(pl.LightningModule):
                 loss_list.append(cur_loss)
         
         return loss, loss_list
-
-    def forward(self, pov, vec, actions):
-        '''
-        Given a sequence, chops it into smaller subsequences and forwards each individually.
-        Gradients are blocked between subsequences to make it less memory intensive.
-        pov - (T, 3, 64, 64)
-        vec - (T, 64)
-        actions - (T, 64)
-        '''
-        self.max_seq_len = 300 #TODO put this somewhere else
-        #TODO
-        
-        
-        
-    def subsequence_forward(self, pov, vec, actions, last_hidden=None):
+    
+    def forward(self, pov, vec, actions, last_hidden=None):
         '''
         Given a sequence of pov, vec and actions, computes priors over next latent
         state.
@@ -372,19 +359,6 @@ class MDN_RNN(pl.LightningModule):
         self.trainer.logger.experiment.add_figure('Training/loss_per_frame', figure, self.global_step)
         return loss
         
-    def validation_step(self, batch, batch_idx):
-        # perform predictions and compute loss
-        loss, loss_list, entropy_list = self._step(batch)
-        # score and log predictions
-        self.log('Validation/loss', loss, on_epoch=True)
-    
-        figure = plt.figure()
-        plt.plot(np.arange(1,len(loss_list)+1,1), torch.tensor(loss_list).detach().cpu().numpy())
-        plt.xlabel('Frame')
-        plt.ylabel('Loss')
-        self.trainer.logger.experiment.add_figure('Validation/loss_per_frame', figure, self.global_step)
-        return loss
-    
     def validation_epoch_end(self, batch_losses):
         # check whether to go to next step in curriculum, 
         # but only if latent overshooting is active

@@ -40,7 +40,7 @@ class PredictionCallback(pl.Callback):
         self.every_n_batches = every_n_batches
 
         #x_samples, x_mean = pl_module.sample(self.batch_size)
-        pov, vec_obs, act, _ = map(lambda x: x[:seq_len], dataset[0])
+        pov, vec_obs, act, _ = map(lambda x: x[:seq_len], next(dataset))
         pov = torch.from_numpy(einops.rearrange(pov, 't c h w -> 1 t c h w')).float() / 255
         vec = torch.from_numpy(einops.rearrange(vec_obs, 't d -> 1 t d'))
         act = torch.from_numpy(einops.rearrange(act, 't d -> 1 t d'))
@@ -168,23 +168,13 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
-    data = datasets.DynamicsData(env_name, data_dir, seq_len + conditioning_len, num_data)
-    lengths = [len(data)-int(len(data)*val_perc), int(len(data)*val_perc)]
-    train_data, val_data = random_split(data, lengths)
-    train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size, num_workers=6, pin_memory=True)
-    val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=6, pin_memory=True)
-
-    num_batches = len(train_data) // batch_size
-    if len(train_data) % batch_size != 0:
-        num_batches += 1
-
-    print(f'\nnum train samples = {len(train_data)} --> {num_batches} train batches')
-    print(f'num val samples = {len(val_data)}')
+    train_data = datasets.DynamicsData(env_name, data_dir, seq_len + conditioning_len, batch_size)
+    train_loader = DataLoader(train_data, batch_size=None, num_workers=1, pin_memory=True)
 
     model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
     prediction_callback = PredictionCallback(
         every_n_batches=save_freq,
-        dataset=val_data,
+        dataset=train_data,
         seq_len=10
     )
     callbacks = [model_checkpoint, prediction_callback]
@@ -195,11 +185,10 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         gpus=torch.cuda.device_count(),
         accelerator='dp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
-        val_check_interval=val_check_interval if val_check_interval > 1 else float(val_check_interval),
         max_epochs=epochs,
         track_grad_norm=2,
     )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader)
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
