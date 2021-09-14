@@ -275,6 +275,18 @@ class DynamicsData(IterableDataset):
     def __iter__(self):
         return self._iterator()
 
+class SingleSequenceDynamics(IterableDataset):
+    def __init__(self, env_name, data_dir, seq_len, batch_size):
+        self.dataset = DynamicsData(env_name, data_dir, seq_len, batch_size)
+        self.batch_size = batch_size
+        self.batch = next(iter(self.dataset))
+    
+    def __len__(self):
+        return self.batch_size
+    
+    def __getitem__(self, idx):
+        return self.batch
+    
 
 class PretrainQNetIterableData(IterableDataset):
     def __init__(self, env_name, data_dir, centroids, n_step, gamma, num_workers):

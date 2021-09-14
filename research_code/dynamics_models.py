@@ -337,11 +337,14 @@ class MDN_RNN(pl.LightningModule):
         return {'optimizer':optimizer, 'lr_scheduler':lr_dict}
     
     def _init_curriculum(self, seq_len=None, curriculum_start=0):
+        self.curriculum_step = 0
+        '''
         if seq_len is None:
             seq_len = self.hparams.seq_len
         self.curriculum = [i for i in range(seq_len-2)]
         self.curriculum_step = curriculum_start
-
+        '''
+        
     def _check_curriculum_cond(self, value):
         if self.curriculum_step < len(self.curriculum)-1:
             if value < self.hparams.curriculum_threshold:

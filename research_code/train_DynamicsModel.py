@@ -173,8 +173,8 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
-    train_data = datasets.DynamicsData(env_name, data_dir, seq_len + conditioning_len, batch_size)
-    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
+    train_data = datasets.SingleSequenceDynamics(env_name, data_dir, seq_len + conditioning_len, batch_size)
+    train_loader = DataLoader(train_data, batch_size=None, num_workers=1, pin_memory=True)
 
     model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
     prediction_callback = PredictionCallback(
