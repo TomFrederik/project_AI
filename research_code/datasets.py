@@ -249,10 +249,10 @@ class DynamicsData(IterableDataset):
         rew = np.array([r for r in rew]).astype(np.float32)
         
         start_idcs = [len(obs) % self.seq_len + self.seq_len * i for i in range(len(obs)//self.seq_len)]
-        pov_list = [pov[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
-        vec_list = [vec[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
-        act_list = [act[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
-        rew_list = [rew[start_idx:start_idx+self.seq_len-1] for start_idx in start_idcs]
+        pov_list = [pov[start_idx:start_idx+self.seq_len] for start_idx in start_idcs]
+        vec_list = [vec[start_idx:start_idx+self.seq_len] for start_idx in start_idcs]
+        act_list = [act[start_idx:start_idx+self.seq_len] for start_idx in start_idcs]
+        rew_list = [rew[start_idx:start_idx+self.seq_len] for start_idx in start_idcs]
     
         self.buffer.extend(zip(pov_list, vec_list, act_list, rew_list))
         shuffle(self.buffer)
@@ -275,18 +275,24 @@ class DynamicsData(IterableDataset):
     def __iter__(self):
         return self._iterator()
 
-class SingleSequenceDynamics(IterableDataset):
+class SingleSequenceDynamics(Dataset):
     def __init__(self, env_name, data_dir, seq_len, batch_size):
         self.dataset = DynamicsData(env_name, data_dir, seq_len, batch_size)
         self.batch_size = batch_size
-        self.batch = next(iter(self.dataset))
+        iterator = iter(self.dataset)
+        self.seq_1 = next(iterator)
+        self.seq_2 = next(iterator)
     
     def __len__(self):
-        return self.batch_size
+        return 2
     
     def __getitem__(self, idx):
-        return self.batch
-    
+        #return self.batch
+        if idx == 0:
+            return [x[None] for x in self.seq_1]
+        elif idx == 1:
+            return [x[None] for x in self.seq_2]
+
 
 class PretrainQNetIterableData(IterableDataset):
     def __init__(self, env_name, data_dir, centroids, n_step, gamma, num_workers):

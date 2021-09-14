@@ -40,7 +40,8 @@ class PredictionCallback(pl.Callback):
         self.every_n_batches = every_n_batches
 
         #x_samples, x_mean = pl_module.sample(self.batch_size)
-        pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iter(dataset))[:-1])
+        #pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iter(dataset))[:-1])
+        pov, vec_obs, act = map(lambda x: x[:,:seq_len], dataset[0][:-1])
         pov = torch.from_numpy(pov)
         vec = torch.from_numpy(vec_obs)
         act = torch.from_numpy(act)
@@ -144,7 +145,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         monitor = 'Validation/loss'
         """
     elif dynamics_model == 'mdn':
-        gru_kwargs = {'num_layers':1, 'hidden_size':512}
+        gru_kwargs = {'num_layers':1, 'hidden_size':16*16*32}
         model_kwargs = {
             'gru_kwargs':gru_kwargs, 
             'seq_len':seq_len, 
@@ -173,16 +174,19 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         model = STR_TO_MODEL[dynamics_model](**model_kwargs)
 
     # load data
-    train_data = datasets.SingleSequenceDynamics(env_name, data_dir, seq_len + conditioning_len, batch_size)
-    train_loader = DataLoader(train_data, batch_size=None, num_workers=1, pin_memory=True)
+    #train_data = datasets.SingleSequenceDynamics(env_name, data_dir, seq_len + conditioning_len, batch_size)
+    train_data = datasets.DynamicsData(env_name, data_dir, seq_len + conditioning_len, batch_size)
+    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
 
     model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+    '''
     prediction_callback = PredictionCallback(
         every_n_batches=save_freq,
         dataset=train_data,
         seq_len=10
-    )
-    callbacks = [model_checkpoint, prediction_callback]
+    )'''
+    #callbacks = [model_checkpoint, prediction_callback]
+    callbacks = [model_checkpoint]
     trainer=pl.Trainer(
         progress_bar_refresh_rate=1, #every N batches update progress bar
         log_every_n_steps=1,
@@ -191,7 +195,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         accelerator='dp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
         max_epochs=epochs,
-        #track_grad_norm=2,
+        track_grad_norm=2,
     )
     trainer.fit(model, train_loader)
 

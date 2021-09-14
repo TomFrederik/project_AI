@@ -22,6 +22,8 @@ EPS = 1e-10
 
 plt.switch_backend('agg')
 
+from x_transformers import XTransformer
+
 class MDNRNNReward(nn.Module):
     def __init__(self, mdn_path, reward_path):
         super().__init__()
@@ -95,7 +97,10 @@ class MDN_RNN(pl.LightningModule):
         
         # set up model
         self.gru_input_dim = self.pre_gru_channels * self.pre_gru_size + 64
+        self.gru_input_dim = 16 * 16 * 32
         self.gru = nn.GRU(**gru_kwargs, input_size=self.gru_input_dim, batch_first=True)
+
+        self.lstm = nn.LSTM(input_size=self.gru_input_dim, hidden_size=1024, batch_first=True)
 
         self.mdn_network = nn.Sequential(
             nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
@@ -110,12 +115,46 @@ class MDN_RNN(pl.LightningModule):
                 )  # 8 -> 16
         )
         
+        self.linear = nn.Sequential(
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 16*16*32)
+        )
+
+        '''
+        self.transformer = XTransformer(
+            dim = 512,
+            enc_num_tokens = self.num_embeddings ** (16 * 16),
+            enc_depth = 6,
+            enc_heads = 8,
+            enc_max_seq_len = seq_len,
+            dec_num_tokens = self.num_embeddings ** (16 * 16),
+            dec_depth = 6,
+            dec_heads = 8,
+            dec_max_seq_len = seq_len,
+            tie_token_emb = True,      # tie embeddings of encoder and decoder
+            enc_rotary_pos_emb = True,
+            dec_rotary_pos_emb = True
+        )
+        '''
+
+
+
     def _step(self, batch):
         # unpack batch
         pov, vec, actions, _ = batch
 
         # make predictions
         if self.hparams.VAE_class == 'vqvae':
+            '''
+            B, T, *_ = pov.shape
+            # pov encoding
+            _, ind, _ = self.VAE.encode_only(einops.rearrange(pov, 'b t c h w -> (b t) c h w'))
+            *_, H, W = ind.shape
+            src = einops.rearrange(ind, '(b t) h w -> b t (h w)', b=B, t=T)
+            src_mask = 
+            self.transformer(ind)
+            '''
             pov_logits, pov_sample, target = self(pov, vec, actions)
 
             target = einops.rearrange(target['pov'], 'b t h w -> (b t) (h w)')
@@ -149,16 +188,18 @@ class MDN_RNN(pl.LightningModule):
         '''
         # save shape params
         B, T = pov.shape[:2]
-
+        print(f'{pov.shape = }')
         # merge frames with batch for batch processing
         pov = einops.rearrange(pov, 'b t c h w -> (b t) c h w')
         
         # encode pov to latent
         if self.hparams.VAE_class == 'vqvae':
             pov_sample, ind, log_priors = self.VAE.encode_only(pov)
+            print(f'{pov_sample.shape = }')
 
             ind = einops.rearrange(ind, '(b t) h w -> b t h w', b=B, t=T)
             input_states = einops.rearrange(pov_sample, '(b t) c h w -> b t c h w', b=B, t=T)[:,:-1]
+            print(f'{input_states.shape = }')
             target = {
                 'pov': ind[:,1:]
             }
@@ -166,15 +207,19 @@ class MDN_RNN(pl.LightningModule):
         elif self.hparams.VAE_class == 'vae':
             # the std in the VAE latent is always very close to 1, 
             # so sample doesn't give additional info over mean
-            _, mean, _ = self.VAE.encode_only(pov) 
+            _, mean, std = self.VAE.encode_only(pov) 
             mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', b=B)
-            
+            logstd = einops.rearrange(torch.log(std), '(b t) c h w -> b t c h w', b=B)
+
             target_mean = mean[:,1:]
+            target_logstd = logstd[:,1:]
             target = {
-                'pov': target_mean
+                'pov_mean': target_mean,
+                'pov_std': target_logstd
             }
-            
-            input_states = mean[:,:-1]
+            raise NotImplementedError
+            # TODO: incorporate logstd in network
+            #input_states = torch.cat([mean[:,:-1], logstd[:,:-1]], dim)
             
         # condition on previous sequence to prime the RNN
         if self.hparams.conditioning_len > 0:
@@ -221,18 +266,26 @@ class MDN_RNN(pl.LightningModule):
         '''
         # save T for later
         B, T, C, H, W = states.shape
+        print(f'{states.shape = }')
+        states, _ = self.lstm(einops.rearrange(states, 'b t c h w -> b t (c h w)'))
 
+        pov_logits = einops.rearrange(self.linear(einops.rearrange(states, 'b t chw -> (b t) chw')), '(b t) (c hw) -> b t c hw', b=B, t=T, c=self.num_embeddings)
+        return pov_logits, None, None
+        
         # distill states with conv net
         conv_out = einops.rearrange(self.conv_net(einops.rearrange(states, 'b t c h w -> (b t) c h w')), '(b t) c h w -> b t (c h w)', t=T)
+        print(f'{conv_out.shape = }')
+        print(f'{actions.shape = }')
         
         # compute hidden states of gru
         #print(f'{conv_out = }')
         #print(f'{actions = }')
         if h0 is None:
-            actions = torch.zeros_like(actions)
+            #actions = torch.zeros_like(actions)
             hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2))
         else:
             hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2), h0)
+        print(f'{hidden_states_seq.shape = }')
 
         # compute next state
         #pov_pred = einops.rearrange(self.linear(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d')), 'bt (c h w) -> bt c h w', c=C, h=H, w=W)
@@ -249,6 +302,7 @@ class MDN_RNN(pl.LightningModule):
             state = self.VAE.quantizer.embed_one_hot(one_hot_ind)
             state = einops.rearrange(state, '(b t latent_size) embed_dim -> b t embed_dim latent_size', latent_size=self.latent_size, t=T)
             pov_logits = einops.rearrange(pov_logits, '(b t latent_size) num_embeds -> b t num_embeds latent_size', t=T, latent_size=self.latent_size)
+            print(f'{pov_logits.shape = }')
             return pov_logits, state, hidden_states_seq
         
         elif self.hparams.VAE_class == 'vae':
@@ -325,7 +379,8 @@ class MDN_RNN(pl.LightningModule):
     
     def configure_optimizers(self):
         # set up optimizer
-        params = list(self.gru.parameters()) + list(self.mdn_network.parameters()) + list(self.conv_net.parameters())
+        #params = list(self.gru.parameters()) + list(self.mdn_network.parameters()) + list(self.conv_net.parameters()) + list(self.linear.parameters())
+        params = list(self.linear.parameters()) + list(self.lstm.parameters())
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs, weight_decay=0)
         # set up scheduler
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])
@@ -338,6 +393,7 @@ class MDN_RNN(pl.LightningModule):
     
     def _init_curriculum(self, seq_len=None, curriculum_start=0):
         self.curriculum_step = 0
+        self.curriculum = [0]
         '''
         if seq_len is None:
             seq_len = self.hparams.seq_len
