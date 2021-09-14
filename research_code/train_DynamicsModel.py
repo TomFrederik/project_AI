@@ -44,7 +44,7 @@ class PredictionCallback(pl.Callback):
         pov = torch.from_numpy(pov)
         vec = torch.from_numpy(vec_obs)
         act = torch.from_numpy(act)
-        self.seq_len = seq_len = pov.shape[1]
+        self.seq_len = pov.shape[1]
         self.sequence = (pov, vec, act)
 
     def on_epoch_end(self, trainer, pl_module):
@@ -77,16 +77,23 @@ class PredictionCallback(pl.Callback):
         
         # predict sequence
         _, pov_samples, _ = pl_module.forward(*self.sequence)
-        
         if pl_module.hparams.VAE_class == 'vqvae':
-            print('WARNING: VQVAE reconstruction not implemented')
+            pov_samples = einops.rearrange(pov_samples, 'b t c (h w) -> (b t) c h w', h=16, w=16)
+            
+            # reconstruct images
+            pov_reconstruction = pl_module.VAE.decode_only(pov_samples)
+            
+            # stack images
+            images = torch.stack([self.sequence[0][0,1:], pov_reconstruction], dim=1).reshape(((self.seq_len -1) * 2, 3, 64, 64))
+
+            # log images to tensorboard
+            trainer.logger.experiment.add_image('Prediction', make_grid(images, nrow=2), epoch)
         
         else:
             pov_samples = einops.rearrange(pov_samples, 'b t c h w -> (b t h w) c')
-            # predict with Conv and RNN
+            # reconstruct images
             pov_reconstruction = pl_module.VAE.decode_only(pov_samples)
 
-            # reconstruct images
             images = torch.stack([self.sequence[0][0,1:], pov_reconstruction], dim=1).reshape(((self.seq_len -1) * 2, 3, 64, 64))
 
             # log images to tensorboard
@@ -100,13 +107,14 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
                         val_check_interval, load_from_checkpoint, version,
                         profile, temp,
                         conditioning_len, curriculum_threshold, curriculum_start,
-                        predict_idcs_directly, embed, save_freq):
+                        save_freq):
     
     pl.seed_everything(1337)
 
     if VAE_class == 'vae':
         vae_path = os.path.join(log_dir, 'VAE', env_name, 'lightning_logs', 'version_'+str(vae_version), 'checkpoints/last.ckpt')
-    elif VAE_class == 'vqae':
+    elif VAE_class == 'vqvae':
+        #vae_path = os.path.join(log_dir, 'VQVAE', env_name, 'lightning_logs', 'version_'+str(vae_version), 'checkpoints/last.ckpt')
         vae_path = os.path.join(log_dir, 'VQVAE', env_name, 'lightning_logs', 'version_'+str(vae_version), 'checkpoints/last.ckpt')
 
     # make sure that relevant dirs exist
@@ -136,7 +144,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         monitor = 'Validation/loss'
         """
     elif dynamics_model == 'mdn':
-        gru_kwargs = {'num_layers':1, 'hidden_size':256}
+        gru_kwargs = {'num_layers':1, 'hidden_size':512}
         model_kwargs = {
             'gru_kwargs':gru_kwargs, 
             'seq_len':seq_len, 
@@ -150,8 +158,6 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
             'conditioning_len':conditioning_len,
             'curriculum_threshold':curriculum_threshold,
             'curriculum_start':curriculum_start,
-            'predict_idcs_directly':predict_idcs_directly,
-            'embed':embed
         }
         monitor = 'Training/loss'
     else:
@@ -185,7 +191,7 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         accelerator='dp', #anything else here seems to lead to crashes/errors
         default_root_dir=log_dir,
         max_epochs=epochs,
-        track_grad_norm=2,
+        #track_grad_norm=2,
     )
     trainer.fit(model, train_loader)
 
@@ -207,15 +213,13 @@ if __name__=='__main__':
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
     parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
-    parser.add_argument('--VAE_class', type=str, default='vae', choices=['vae' 'vqvae'])
+    parser.add_argument('--VAE_class', type=str, default='vae', choices=['vae', 'vqvae'])
     parser.add_argument('--vae_version', type=int, default=0)
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')
     parser.add_argument('--val_check_interval', default=1, type=int, help='How often to validate. N == 1 --> once per epoch; N > 1 --> every N steps')
     parser.add_argument('--load_from_checkpoint', action='store_true')
     #parser.add_argument('--latent_overshooting', action='store_true')
     parser.add_argument('--profile', action='store_true')
-    parser.add_argument('--embed', action='store_true')
-    parser.add_argument('--predict_idcs_directly', action='store_true', help='Whether to predict embedding idcs directly or predict vectors which are then mapped to their closes idx')
     parser.add_argument('--temp', default=1, type=float)
     parser.add_argument('--curriculum_threshold', default=3, type=float)
     parser.add_argument('--curriculum_start', default=0, type=int)

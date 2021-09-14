@@ -129,3 +129,9 @@ class GumbelQuantize(nn.Module):
 
         ind = soft_one_hot.argmax(dim=1)
         return z_q, diff, ind, None
+
+    def embed_one_hot(self, embed_vec):
+        '''
+        embed vec is of shape (B * T * H * W, n_embed)
+        '''
+        return embed_vec @ self.embed.weight
