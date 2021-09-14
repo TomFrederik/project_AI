@@ -86,7 +86,7 @@ class MDN_RNN(pl.LightningModule):
         print(f'{dummy_sample.shape = }')
         self.latent_h = dummy_sample.shape[-1]
         self.latent_size = np.prod(dummy_sample.shape[2:])
-                
+        
         num_channels = dummy_sample.shape[1]
         self.conv_net = nn.Sequential(
                 nn.Conv2d(in_channels=num_channels, out_channels=64, kernel_size=3, padding=1, stride=2), # 16 -> 8
@@ -98,7 +98,8 @@ class MDN_RNN(pl.LightningModule):
                 nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
             )
         
-        dummy_sample = self.conv_net(dummy_sample)
+        #dummy_sample = self.conv_net(dummy_sample)
+
         self.pre_gru_size = np.prod(dummy_sample.shape[2:])
         self.pre_gru_channels = dummy_sample.shape[1]
         print(f'\npre_gru_size (H*W) = {self.pre_gru_size}')
@@ -107,28 +108,6 @@ class MDN_RNN(pl.LightningModule):
         # set up model
         self.gru_input_dim = self.pre_gru_channels * self.pre_gru_size + 64
         self.gru = nn.GRU(**gru_kwargs, input_size=self.gru_input_dim, batch_first=True)
-
-
-        # test whether weight_hh_l0 has gradients. It has gradients.
-        """
-        B = 1000
-        T = 3
-        D_in = self.gru_input_dim
-        D_out = gru_kwargs['hidden_size']
-        input_tensor = torch.ones((B,T,D_in), requires_grad=True, device='cuda')
-        h_0 = torch.ones((1,B,D_out), requires_grad=False, device='cuda')
-
-        output1, _ = self.gru(input_tensor)
-        loss1 = output1.pow(2).sum()
-        loss1.backward()
-        print(self.gru.weight_hh_l0.grad)
-
-        output2, _ = self.gru(input_tensor, h_0)
-        loss2 = output2.pow(2).sum()
-        loss2.backward()
-        print(self.gru.weight_hh_l0.grad)
-        raise ValueError
-        """
 
         self.mdn_network = nn.Sequential(
             nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
@@ -142,6 +121,10 @@ class MDN_RNN(pl.LightningModule):
                 kernel_size=3, padding=1, stride=2, output_padding=1
                 )  # 8 -> 16
         )
+        
+        
+        self.linear = nn.Linear(gru_kwargs['hidden_size'], self.pre_gru_size*self.pre_gru_channels)
+        
 
     def _step(self, batch):
         # unpack batch
@@ -269,10 +252,11 @@ class MDN_RNN(pl.LightningModule):
             hidden_state_seq - hidden states of the RNN after each time step
         '''
         # save T for later
-        T = states.shape[1]
+        B, T, C, H, W = states.shape
         
         # distill states with conv net
-        conv_out = einops.rearrange(self.conv_net(einops.rearrange(states, 'b t c h w -> (b t) c h w')), '(b t) c h w -> b t (c h w)', t=T)
+        #conv_out = einops.rearrange(self.conv_net(einops.rearrange(states, 'b t c h w -> (b t) c h w')), '(b t) c h w -> b t (c h w)', t=T)
+        conv_out = einops.rearrange(states, 'b t c h w -> b t (c h w)')
         
         # compute hidden states of gru
         #print(f'{conv_out = }')
@@ -283,7 +267,8 @@ class MDN_RNN(pl.LightningModule):
             hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2), h0)
 
         # compute next state
-        pov_pred = self.mdn_network(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d 1 1'))
+        pov_pred = einops.rearrange(self.linear(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d')), 'bt (c h w) -> bt c h w', c=C, h=H, w=W)
+        #pov_pred = self.mdn_network(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d 1 1'))
 
         if self.hparams.VAE_class == 'vqvae':
             pov_logits = einops.rearrange(pov_pred, 'bt embedding_dim h w -> (bt h w) embedding_dim') # embedding_dim or num_embeddings
