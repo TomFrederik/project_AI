@@ -137,6 +137,30 @@ class MDN_RNN(pl.LightningModule):
             dec_rotary_pos_emb = True
         )
         '''
+        self.cnn_3d= nn.Sequential(
+            nn.Conv3d(32, 64, 3, 1, 1),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool3d((16,16,seq_len-1)),
+            nn.Conv3d(64, 64, 3, 1, 1),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool3d((8,8,seq_len-1)),
+            nn.Conv3d(64, 64, 3, 1, 1),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool3d((4,4,seq_len-1)), # B L 256 4 4
+            einops.layers.torch.Rearrange('B T C H W -> B (T C H W)'),
+            nn.Linear((seq_len-1)*4*4*64, 64*8*8),
+            einops.layers.torch.Rearrange('B (C H W) -> B C H W', C=64, H=8, W=8),
+            nn.ConvTranspose2d(64, 64, 3, 1, 1),
+            nn.UpsamplingNearest2d((16,16)),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 64, 3, 1, 1),
+            nn.UpsamplingNearest2d((32,32)),
+            nn.ConvTranspose2d(64, 64, 3, 1, 1),
+            nn.UpsamplingNearest2d((16,16)),
+            nn.ConvTranspose2d(64, 32, 3, 1, 1)
+        )
+        
+        self.ce_loss = nn.CrossEntropyLoss()
 
 
 
@@ -155,12 +179,36 @@ class MDN_RNN(pl.LightningModule):
             src_mask = 
             self.transformer(ind)
             '''
+            B, T, *_ = pov.shape
+            # pov encoding
+            z_q, ind, _ = self.VAE.encode_only(einops.rearrange(pov, 'b t c h w -> (b t) c h w'))
+            *_, C, H, W = z_q.shape
+            print(f'{z_q.shape = }')
+            print(f'{ind.shape = }')
+            
+            z_q = einops.rearrange(z_q, '(b t) c h w -> b c t h w', b=B, t=T)
+            ind = einops.rearrange(ind, '(b t) c h w -> b t c h w', b=B)
+            print(f'{z_q.shape = }')
+            print(f'{ind.shape = }')
+
+            src = z_q[:,:,:-1]
+            tgt = ind[:,:,-1]
+            pred = self.cnn_3d(src)
+            print(f'{src.shape = }')
+            print(f'{tgt.shape = }')
+            print(f'{pred.shape = }')
+            
+            loss = self.ce_loss(pred, tgt)
+
+            return loss            
+        
+            
             pov_logits, pov_sample, target = self(pov, vec, actions)
 
             target = einops.rearrange(target['pov'], 'b t h w -> (b t) (h w)')
             pov_logits = einops.rearrange(pov_logits, 'b t c hw -> (b t) c hw')
 
-            loss = nn.CrossEntropyLoss()(pov_logits, target)
+            loss = self.ce_loss(pov_logits, target)
 
 
         elif self.hparams.VAE_class == 'vae':
@@ -380,7 +428,7 @@ class MDN_RNN(pl.LightningModule):
     def configure_optimizers(self):
         # set up optimizer
         #params = list(self.gru.parameters()) + list(self.mdn_network.parameters()) + list(self.conv_net.parameters()) + list(self.linear.parameters())
-        params = list(self.linear.parameters()) + list(self.lstm.parameters())
+        params = list(self.cnn_3d.parameters())
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs, weight_decay=0)
         # set up scheduler
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])
