@@ -229,7 +229,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', default=1e-5, type=float)
     parser.add_argument('--gamma', default=0.99, type=float)
     parser.add_argument('--margin', default=0.8, type=float)
-    parser.add_argument('--n', default=10, type=int, help='Horizon for n-step TD error')
+    parser.add_argument('--n', default=50, type=int, help='Horizon for n-step TD error')
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--vqvae_path', help='Path to encoding model')

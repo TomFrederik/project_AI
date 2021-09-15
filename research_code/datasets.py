@@ -325,7 +325,7 @@ class PretrainQNetIterableData(IterableDataset):
         pov_obs, vec_obs = [item['pov'] for item in obs], [item['vector'] for item in obs]
         pov_obs = einops.rearrange(np.array(pov_obs), 'b h w c -> b c h w').astype(np.float32) / 255
         vec_obs = np.array(vec_obs).astype(np.float32)
-        rewards = np.array(rewards).astype(np.float32)
+        rewards = np.log(1 + np.array(rewards).astype(np.float32)) # log for better scaled rewards
         actions = np.array([ac['vector'] for ac in actions]).astype(np.float32)
 
         # compute actions
