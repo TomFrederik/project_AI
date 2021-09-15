@@ -64,6 +64,10 @@ class VAE(pl.LightningModule):
 
         sample = self.sample(mean, log_std)
         return sample, mean, torch.exp(log_std)
+    
+    def encode_with_grad(self, x):
+        #TODO
+        raise NotImplementedError
 
     @torch.no_grad()
     def decode_only(self, z):

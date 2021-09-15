@@ -79,6 +79,11 @@ class VQVAE(pl.LightningModule):
         x_hat = self.decoder(z_q)
         x_hat = self.recon_loss.unmap(x_hat)
         return x_hat
+    
+    def decode_with_grad(self, z_q):
+        x_hat = self.decoder(z_q)
+        x_hat = self.recon_loss.unmap(x_hat)
+        return x_hat
 
     @torch.no_grad()
     def encode_only(self, x):
