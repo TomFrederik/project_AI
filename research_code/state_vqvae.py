@@ -71,8 +71,6 @@ class StateVQVAE(pl.LightningModule):
 
         num_input_channels = self.vqvae.hparams.args.embedding_dim        
         print(f'{num_input_channels = }')
-        #self.cnn_encoder = CNNEncoder(num_input_channels)
-        #self.cnn_decoder = CNNDecoder(num_input_channels)
         self.cnn_encoder = DeepMindEncoder(num_input_channels, n_hid=64)
         dummy = torch.zeros((2,num_input_channels,16,16), device=self.device)
         self.cnn_encoded = self.cnn_encoder(dummy)
@@ -114,9 +112,7 @@ class StateVQVAE(pl.LightningModule):
             self.quantizer
         ]
 
-    def loss_fn(self, predictions, targets):
-        return nn.CrossEntropyLoss()(predictions, targets)
-        #return ((predictions - targets) ** 2).mean() / (2 * self.data_var)
+        self.loss_fn = nn.CrossEntropyLoss()
     
     @torch.no_grad()
     def _compute_perplexity(self, ind):
@@ -124,7 +120,7 @@ class StateVQVAE(pl.LightningModule):
         encodings = einops.rearrange(F.one_hot(ind, self.quantizer.codebook_size).float(), 'b n c -> (b n) c')
         avg_probs = encodings.mean(0)
         perplexity = (-(avg_probs * torch.log(avg_probs + 1e-10)).sum()).exp()
-        cluster_use = torch.sum(avg_probs > 0) #TODO: cluster use is always at max, even with 512 clusters. IS WEIRD!
+        cluster_use = torch.sum(avg_probs > 0)
         return perplexity, cluster_use
 
     def _apply_frame_encoding(self, pov_obs):
@@ -181,7 +177,6 @@ class StateVQVAE(pl.LightningModule):
         )
         
         # decode with lstm
-        #print(f'{dec_lstm_input.shape = }')
         dec_hidden_state_seq, (dec_last_hidden, dec_last_cell) = self.lstm_decoder(dec_lstm_input, dec_first_hidden, dec_first_cell)
 
         # prepare cnn decoder input

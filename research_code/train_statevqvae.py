@@ -123,15 +123,6 @@ def main(
     else:
         model = StateVQVAE(**model_kwargs).to(device)
     
-    '''
-    stat_path = os.path.join(framevqvae[:-9], 'stats.json')
-    print(f'{stat_path = }')
-    if os.path.exists(stat_path):
-        model.find_data_mean_var(train_loader, load_from=stat_path)
-    else:
-        model.find_data_mean_var(train_loader, save_to=stat_path)
-    '''
-    
     callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
     # TODO add callbacks for LR decay and beta ramp
     callbacks.append(DecayLR(lr_decay_max_time))
