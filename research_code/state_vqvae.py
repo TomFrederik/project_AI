@@ -191,7 +191,8 @@ class StateVQVAE(pl.LightningModule):
         predictions = einops.rearrange(torch.cat(predictions, dim=0), '(b t) c h w -> b t c h w', t=T)
         
         return predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
-
+    
+    ''' #TODO
     def _process_subsequence(
         self, 
         pov_obs, 
@@ -253,6 +254,7 @@ class StateVQVAE(pl.LightningModule):
 
         return reconstruction_loss, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
 
+    
     def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
         if max_seq_len is None:
             max_seq_len = self.hparams.max_seq_len
@@ -293,6 +295,7 @@ class StateVQVAE(pl.LightningModule):
         all_ind = torch.cat(all_ind, dim=0)
 
         return total_reconstruction_loss, total_latent_loss, all_ind
+    '''
 
     def forward(self, pov_obs, vec_obs, actions, max_seq_len=None):
         if max_seq_len is None:
@@ -383,10 +386,14 @@ class StateVQVAE(pl.LightningModule):
             
             latent_loss = torch.sum(torch.tensor(all_latent_losses, device=self.device))
         else:
-            raise NotImplementedError
-            enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2) # (B T D+A)
-            predictions, latent_loss, *_ = self._predict_subsequence(enc_lstm_input, h_0)
-        
+            predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence( 
+                enc_lstm_input[:,:max_seq_len],
+                dec_lstm_input[:,:max_seq_len], 
+                enc_first_hidden
+            )
+            all_predictions = [predictions]
+            all_ind = ind
+
         # predictions.shape = [B, T-1, 32, 16, 16]
         # compute log_priors and update
         if not self.hparams.discard_priors:

@@ -8,6 +8,85 @@ import argparse
 import os
 from time import time
 import math
+import einops
+from torchvision.utils import make_grid
+
+
+class PredictionCallback(pl.Callback):
+
+    def __init__(self, every_n_epochs=1, dataset=None, every_n_batches=100, seq_len=10):
+        """
+        Inputs:
+            every_n_epochs - Only save those images every N epochs
+            dataset - Dataset to sample from
+            save_to_disk - If True, the samples and image means should be saved to disk as well.
+            every_n_batches - Only save those images every N batches
+            seq_len - maximum seq len of the sample, if dataset only contains shorter samples then that is the maximum seq len instead
+        """
+        super().__init__()
+        self.every_n_epochs = every_n_epochs
+        self.every_n_batches = every_n_batches
+
+        #x_samples, x_mean = pl_module.sample(self.batch_size)
+        pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[0])
+        #pov, vec_obs, act = map(lambda x: x[:,:seq_len], dataset[0][:-1])
+        pov = torch.from_numpy(pov)
+        vec = torch.from_numpy(vec_obs)
+        act = torch.from_numpy(act)
+        self.seq_len = pov.shape[1]
+        self.sequence = (pov, vec, act)
+
+    def on_epoch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (trainer.current_epoch+1) % self.every_n_epochs == 0:
+            self.predict_sequence(trainer, pl_module, trainer.current_epoch+1)
+    
+    def on_batch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (pl_module.global_step+1) % self.every_n_batches == 0:
+            self.predict_sequence(trainer, pl_module, pl_module.global_step+1)
+
+    def predict_sequence(self, trainer, pl_module, epoch):
+        """
+        Function that predicts sequence and generates images.
+        Inputs:
+            trainer - The PyTorch Lightning "Trainer" object.
+            pl_module - The VAE model that is currently being trained.
+            epoch - The epoch number to use for TensorBoard logging and saving of the files.
+        """
+        # make sure sequence is on correct device
+        if self.sequence[0].device != pl_module.device:
+            self.sequence = list(map(lambda x: x.to(pl_module.device), self.sequence))
+        
+        # predict sequence
+        predictions, *_ = pl_module(*self.sequence)
+        predictions = torch.nn.functional.softmax(predictions[0], dim=2)
+
+        print(f'{predictions.shape = }')
+        B, T, C, H, W = predictions.shape
+        # sample from predictions
+        ind_samples = torch.multinomial(einops.rearrange(predictions, 'b t c h w -> (b t h w) c'), 1)[:,0]
+        print(f'{ind_samples.shape = }')
+        pov_samples = torch.nn.functional.embedding(ind_samples, pl_module.vqvae.quantizer.embed.weight)
+        print(f'{pov_samples.shape = }')
+        pov_samples = einops.rearrange(pov_samples, '(b t h w) c -> (b t) c h w', b=B, t=T, c=C, h=H, w=W)
+        print(f'{pov_samples.shape = }')
+        # reconstruct images
+        pov_reconstruction = pl_module.vqvae.decode_only(pov_samples)
+        
+        # stack images
+        images = torch.stack([self.sequence[0][0,1:], pov_reconstruction], dim=1).reshape(((self.seq_len -1) * 2, 3, 64, 64))
+
+        # log images to tensorboard
+        trainer.logger.experiment.add_image('Prediction', make_grid(images, nrow=2), epoch)
+
+
 
 """
 These ramps/decays follow DALL-E Appendix A.2 Training https://arxiv.org/abs/2102.12092
@@ -129,6 +208,8 @@ def main(
     if gumbel:
        callbacks.extend([DecayTemperature(temp_decay_max_time), RampBeta(ramp_beta_max_time)])
     
+    callbacks.append(PredictionCallback(dataset=dataset, every_n_batches=save_freq))
+
     trainer = pl.Trainer(
         progress_bar_refresh_rate=1,
         log_every_n_steps=1,
@@ -165,9 +246,9 @@ if __name__ == '__main__':
     parser.add_argument('--lstm_enc_input_size', type=int, default=1024)
     parser.add_argument('--gumbel', action='store_true')
     parser.add_argument('--tau', type=float, default=1)
-    parser.add_argument('--lr_decay_max_time', type=int, default=1200000)
-    parser.add_argument('--ramp_beta_max_time', type=int, default=5000)
-    parser.add_argument('--temp_decay_max_time', type=int, default=150000)
+    parser.add_argument('--lr_decay_max_time', type=int, default=1200)
+    parser.add_argument('--ramp_beta_max_time', type=int, default=500)
+    parser.add_argument('--temp_decay_max_time', type=int, default=1500)
     parser.add_argument('--discard_priors', action='store_true')
     
     args = parser.parse_args()
