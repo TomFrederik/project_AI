@@ -256,6 +256,43 @@ class GenerateCallback(pl.Callback):
         trainer.logger.experiment.add_image('Reconstruction',make_grid(images, nrow=2), epoch)
 
 
+class VisualizeLatents(pl.Callback):
+    def __init__(self, every_n_batches=100):
+        super().__init__()
+        self.every_n_batches = every_n_batches
+
+    def on_batch_end(self, trainer, pl_module):
+        """
+        This function is called after every epoch.
+        Call the save_and_sample function every N epochs.
+        """
+        if (pl_module.global_step+1) % self.every_n_batches == 0:
+            self.visualize_latents(trainer, pl_module, pl_module.global_step+1)
+
+    def visualize_latents(self, trainer, pl_module, epoch):
+        """
+        Function that generates and save samples from the VAE.
+        The generated samples and mean images should be added to TensorBoard and,
+        if self.save_to_disk is True, saved inside the logging directory.
+        Inputs:
+            trainer - The PyTorch Lightning "Trainer" object.
+            pl_module - The VAE model that is currently being trained.
+            epoch - The epoch number to use for TensorBoard logging and saving of the files.
+        """
+        images = []
+        for i in range(pl_module.quantizer.n_embed):
+            latent_idcs = torch.ones(1,16*16, dtype=torch.long, device=pl_module.device) * i
+            latent = pl_module.quantizer.embed_code(latent_idcs)
+            latent = einops.rearrange(latent, 'b (h w) c -> b c h w', h=16, w=16)
+            recon = pl_module.decode_only(latent)
+            images.append(recon[0].detach().cpu())
+
+        images = torch.stack(images, dim=0)
+
+        # log images to tensorboard
+        trainer.logger.experiment.add_image('Latents',make_grid(images, nrow=4), epoch)
+
+
 def cli_main():
     pl.seed_everything(1337)
 
@@ -327,6 +364,9 @@ def cli_main():
             save_to_disk=False, 
             every_n_batches=args.callback_freq
         )
+    )
+    callbacks.append(
+        VisualizeLatents(every_n_batches=args.callback_freq)
     )
     callbacks.append(DecayLR())
     if args.vq_flavor == 'gumbel':
