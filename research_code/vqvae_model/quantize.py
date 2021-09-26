@@ -135,3 +135,6 @@ class GumbelQuantize(nn.Module):
         embed vec is of shape (B * T * H * W, n_embed)
         '''
         return embed_vec @ self.embed.weight
+    
+    def embed_code(self, embed_id):
+        return F.embedding(embed_id, self.embed.weight)
