@@ -14,12 +14,11 @@ from tqdm import tqdm
 
 from torch.utils.tensorboard import SummaryWriter
 
-import PretrainDQN
+from PretrainDQN import ConvFeatureExtractor, QNetwork
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error'))
+                        ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error', 'expert'))
 
-torch.backends.cudnn.benchmark = True
 
 class MemoryDataset(torch.utils.data.Dataset):
     
@@ -33,7 +32,7 @@ class MemoryDataset(torch.utils.data.Dataset):
         return len(self.combined_memory)
     
     def __getitem__(self, idx):
-        state, action, next_state, reward, n_step_state, n_step_reward, td_error = self.combined_memory[idx]
+        state, action, next_state, reward, n_step_state, n_step_reward, td_error, expert = self.combined_memory[idx]
         
         pov = einops.rearrange(state['pov'], 'h w c -> c h w').astype(np.float32) / 255
         next_pov = einops.rearrange(next_state['pov'], 'h w c -> c h w').astype(np.float32) / 255
@@ -48,7 +47,7 @@ class MemoryDataset(torch.utils.data.Dataset):
         
         weight = self.weights[idx]
 
-        return (pov, vec), (next_pov, next_vec), (n_step_pov, n_step_vec), action, reward, n_step_reward, idx, weight
+        return (pov, vec), (next_pov, next_vec), (n_step_pov, n_step_vec), action, reward, n_step_reward, idx, weight, expert
     
     def add_episode(self, obs, actions, rewards, td_errors, memory_id):
         self.combined_memory.add_episode(obs, actions, rewards, td_errors, memory_id)
@@ -73,9 +72,11 @@ class CombinedMemory(object):
         self.beta = beta
         self.alpha = alpha
         self.memory_dict = {
-            'expert':ReplayMemory(None, n_step, gamma, p_offset['expert']),
-            'agent':ReplayMemory(agent_memory_capacity, n_step, gamma, p_offset['agent'])
+            'expert':ReplayMemory(None, n_step, gamma, p_offset['expert'], expert=True),
+            'agent':ReplayMemory(agent_memory_capacity, n_step, gamma, p_offset['agent'], expert=False)
         }
+        self.concat_memo = np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])
+    
     def __len__(self):
         return len(self.memory_dict['expert']) + len(self.memory_dict['agent'])
     
@@ -83,20 +84,25 @@ class CombinedMemory(object):
         #time1 = time()
         self.memory_dict[memory_id].add_episode(obs, actions, rewards, td_errors)
         #print(f'Time to add episode = {time() - time1:.2f}s')
-    
+
         # recompute weights
         #time1 = time()
         self._update_weights()
         #print(f'Time to update weights = {time() - time1:.2f}s')
+        if memory_id == 'expert': # TODO do this in a less hacky way
+            self.concat_memo = self.memory_dict[memory_id].memory
+
+        elif memory_id == 'agent':
+            print(len(self.memory_dict['expert'].memory))
+            print(len(self.memory_dict['agent'].memory))
+            self.concat_memo = np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])
    
     def __getitem__(self, idx):
-        return np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])[idx]
+        return self.concat_memo[idx]
 
     def sample(self, batch_size):
         idcs = np.random.choice(np.arange(len(self)), size=batch_size, replace=False, p=self.weights)
-        #for key in self.memory_dict:
-        #    print(key,': ',np.array(self.memory_dict[key].memory).shape)
-        return np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])[idcs], idcs
+        return self.concat_memo[idcs], idcs
 
     def update_beta(self, new_beta):
         for key in self.memory_dict:
@@ -125,11 +131,12 @@ class CombinedMemory(object):
 
 class ReplayMemory(object):
 
-    def __init__(self, capacity, n_step, gamma, p_offset):
+    def __init__(self, capacity, n_step, gamma, p_offset, expert=False):
         self.n_step = n_step
         self.gamma = gamma
         self.p_offset = p_offset
         self.memory = deque([],maxlen=capacity)
+        self.expert = int(expert)
 
     def push(self, *args):
         """Save a transition"""
@@ -142,7 +149,9 @@ class ReplayMemory(object):
         '''
         Adds all transitions within an episode to the memory.
         '''
+        assert len(obs) > self.n_step, f"Expected len(obs) > self.n_step, but are {len(obs)} and {self.n_step}!"
         discount_array = np.array([self.gamma ** i for i in range(self.n_step)])
+
         for t in range(len(obs)-self.n_step):
             state = obs[t]
             action = actions[t]
@@ -162,7 +171,8 @@ class ReplayMemory(object):
                 reward,
                 n_step_state,
                 n_step_reward,
-                td_error
+                td_error,
+                self.expert
             )
         
         
@@ -210,13 +220,17 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
          lr, n_step, capacity, gamma, action_repeat, epsilon, batch_size, num_expert_episodes, data_dir, save_dir,
          alpha, beta_0, agent_p_offset, expert_p_offset):
     
+    torch.manual_seed(1337)
+    np.random.seed(1337)
+
     # set save dir
-    save_dir = os.path.join(save_dir, env_name, str(int(time())))
+    save_dir = os.path.join(save_dir, 'DQfD', env_name, str(int(time())))
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, 'q_net.pt')
     print(f'\nSaving model to {save_path}!')
     writer = SummaryWriter(log_dir=save_dir)
     
+
     # set device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -224,14 +238,14 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     start = time()
 
     # set up model
-    q_net = PretrainDQN.PretrainQNetwork.load_from_checkpoint(model_path).to(device)
+    q_net = QNetwork.load_from_checkpoint(model_path).to(device)
     
     # set up optimization
     optimizer = torch.optim.AdamW(q_net.parameters(), lr=lr)
     loss_fn = nn.MSELoss(reduction='none')
     
     # load centroids
-    centroids_path = os.path.join(centroids_path, env_name + '_centroids.npy')
+    centroids_path = os.path.join(centroids_path, env_name + '_150_centroids.npy') #TODO make sure that it uses the same centroids as in pretraining
     centroids = np.load(centroids_path)
     
     # init memory
@@ -253,7 +267,6 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
     time1 = time()
     while total_env_steps < max_env_steps:
-        
         obs_list = []
         action_list = []
         rew_list = []
@@ -265,7 +278,10 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
         # re-init env
         done = False
+        time1 = time()
         obs = env.reset()
+        print(f'Resetting the environment took {time()-time1}s')
+        
         steps = 0
         total_reward = 0
         obs_list.append(obs)
@@ -278,7 +294,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         
         with torch.no_grad():
             # compute q values
-            q_values = q_net(obs_pov, obs_vec).squeeze()
+            q_values = q_net(obs_pov, obs_vec)[0].squeeze()
             time0 = time()        
             while not done:    
                 
@@ -315,12 +331,12 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
                 
                 # compute q values
                 #time1 = time()
-                q_values = q_net(obs_pov, obs_vec).squeeze()
+                q_values = q_net(obs_pov, obs_vec)[0].squeeze()
                 #print(f'Computing q_values took {time()-time1}s')
 
                 # record td_error
                 #time1 = time()
-                td_error_list.append(np.abs(rew + gamma * q_net(obs_pov, obs_vec, target=True).squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
+                td_error_list.append(np.abs(rew + gamma * q_net(obs_pov, obs_vec, target=True)[0].squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
                 #print(f'Computing td_error took {time()-time1}s')
                         
                 # bookkeeping
@@ -330,18 +346,13 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
                 total_env_steps += 1
                 if steps >= max_episode_len or total_env_steps == max_env_steps:
                     break
-            
+
         print(f'\nEpisode {num_episodes}: Total reward: {total_reward}, Duration: {time()-time0}s')
-        
+        writer.add_scalar('Training/EpisodeReward', total_reward, global_step=num_episodes)
+
         # store episode into replay memory
         print('\nAdding episode to memory...')
         dataset.add_episode(obs_list, action_list, np.array(rew_list), td_error_list, memory_id='agent')
-        #print(dataset[0])
-        #print(len(dataset))
-    
-        # init/update sampler and loader
-        sampler = torch.utils.data.WeightedRandomSampler(replacement=True, num_samples=training_steps_per_iteration * batch_size, weights=dataset.weights)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size, sampler=sampler, num_workers=6)
         
         # perform k updates
         print(f'\nPerforming {training_steps_per_iteration} parameter updates...')
@@ -351,96 +362,69 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         # go to train mode
         q_net.train()
 
-        for batch in tqdm(iter(dataloader)):
+        for i in tqdm(range(training_steps_per_iteration)):
+            batch_idcs = torch.multinomial(torch.from_numpy(dataset.weights), replacement=False, num_samples=batch_size)
+
             # unpack batch
             #time1 = time()
-            state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights = batch
+            batch = [dataset[idx] for idx in batch_idcs]
+            state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights, expert_mask = zip(*batch)
             #print(f'Unpacking batch took {time()-time1}s')
-            
-            # unpack pov and vec
-            pov, vec = state
-            next_pov, next_vec = next_state
-            n_step_pov, n_step_vec = n_step_state
+
+            pov, vec = map(lambda x: np.array(x), zip(*state))
+            next_pov, next_vec = map(lambda x: np.array(x), zip(*next_state))
+            n_step_pov, n_step_vec = map(lambda x: np.array(x), zip(*n_step_state))
 
             # prepare tensors
-            #time1 = time()
-            pov = pov.to(device)
-            vec = vec.to(device)
-            next_pov = next_pov.to(device)
-            next_vec = next_vec.to(device)
-            n_step_pov = n_step_pov.to(device)
-            n_step_vec = n_step_vec.to(device)
-            reward = reward.to(device)
-            n_step_reward = n_step_reward.to(device)
-            action = action.to(device)
-            weights = weights.to(device)
-            #print(f'preparing input took {time()-time1}s')
+            pov = torch.from_numpy(pov).to(device)
+            vec = torch.from_numpy(vec).to(device)
+            next_pov = torch.from_numpy(next_pov).to(device)
+            next_vec = torch.from_numpy(next_vec).to(device)
+            n_step_pov = torch.from_numpy(n_step_pov).to(device)
+            n_step_vec = torch.from_numpy(n_step_vec).to(device)
+            reward = torch.from_numpy(np.array(reward)).to(device)
+            n_step_reward = torch.from_numpy(np.array(n_step_reward)).to(device)
+            action = torch.from_numpy(np.array(action)).to(device)
+            weights = torch.from_numpy(np.array(weights)).to(device)
+            expert_mask = torch.from_numpy(np.array(expert_mask)).to(device)
             
             # compute q values and choose actions
-            #time1 = time()
-            q_values = q_net(pov, vec)
-            #print(f'inferencing q_values took {time()-time1}s')
-            #time1 = time()
+            q_values = q_net(pov, vec)[0]
             next_q_values = q_net(next_pov, next_vec, target=True).detach()
-            #print(f'inferencing next_q_values took {time()-time1}s')
-            #time1 = time()
             base_next_action = torch.argmax(next_q_values, dim=1)
-            #print(f'inferencing base_next_action took {time()-time1}s')
-            #time1 = time()
             n_step_q_values = q_net(n_step_pov, n_step_vec, target=True).detach()
-            #print(f'inferencing n_step_q_values took {time()-time1}s')
-            #time1 = time()
             base_n_step_action = torch.argmax(n_step_q_values, dim=1)
-            #print(f'inferencing base_n_step_action took {time()-time1}s')
             
             # compute losses
-            #time1 = time()
             idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
             selected_q_values = torch.gather(q_values, 1, action[:,None])
-            #print(f'Indexing q_values took {time()-time1}s')
-            #time1 = time()
             selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
-            #print(f'indexing next_q_values took {time()-time1}s')
-            #time1 = time()
             selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
-            #print(f'Indexing n_step_q_values took {time()-time1}s')
-            #time1 = time()
 
             one_step_td_errors = reward + gamma * selected_next_q_values - selected_q_values
-            #print(f'Computing one_step_td_errors took {time()-time1}s')
-            #time1 = time()
             one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
-            #print(f'Computing one_step_loss took {time()-time1}s')
-            #time1 = time()
             
             n_step_td_errors = reward + (gamma ** n_step) * selected_n_step_q_values - selected_q_values
-            #print(f'Computing n_step_td_errors took {time()-time1}s')
-            #time1 = time()
             n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling
-            #print(f'Computing n_step_loss took {time()-time1}s')
-            #time1 = time()
-            loss = one_step_loss + n_step_loss
-            #print(f'Computing losses took {time()-time1}s')
-            #time1 = time()
+
+            loss = one_step_loss + n_step_loss 
+            J_E = (expert_mask * q_net._large_margin_classification_loss(q_values, action)).mean()
+            loss = loss + J_E
             total_loss += loss
-            #print(f'Updating total loss took {time()-time1}s')
             
             # update td errors
-            #time1 = time()
             # update towards n_step td error since that ought to be a more accurate estimate of the 'true' error
             dataset.update_td_errors(batch_idcs, torch.abs(n_step_td_errors))
-            #print(f'Updating td errors took {time()-time1}s')
             
             # backward pass and update
-            time1 = time()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            #print(f'Backward+Step took {time()-time1}s')
-            
-        print(f'\nMean loss = {total_loss.item() / training_steps_per_iteration}')
+
+        mean_loss = total_loss.item() / training_steps_per_iteration
+        print(f'\nMean loss = {mean_loss}')
+        writer.add_scalar('Training/Loss', mean_loss, global_step=num_episodes)
+
         cur_dur = time()-start
         print(f'Time elapsed so far: {cur_dur // 60}m {cur_dur % 60:.1f}s')
         print(f'Time per iteration: {cur_dur / num_episodes:.1f}s')
@@ -451,13 +435,6 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         print('\nUpdating beta...')
         beta = min(beta + 0.01, 1)
         dataset.update_beta(beta)
-        print('\nUpdating Dataloader...') # only update sampling weights after training loop 
-        dataloader = torch.utils.data.DataLoader(
-            dataset, 
-            batch_size, 
-            sampler=torch.utils.data.WeightedRandomSampler(weights=dataset.weights, num_samples=len(dataset), replacement=True),
-            num_workers=6
-        )
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

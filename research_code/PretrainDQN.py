@@ -120,7 +120,7 @@ class QNetwork(pl.LightningModule):
         idcs = torch.arange(0,len(q_values),dtype=torch.long)
         q_values = q_values + self.hparams.margin
         q_values[idcs, expert_action] = q_values[idcs,expert_action] - self.hparams.margin
-        return (torch.max(q_values, dim=1)[0] - q_values[idcs,expert_action]).mean()
+        return torch.max(q_values, dim=1)[0] - q_values[idcs,expert_action]
     
     def training_step(self, batch, batch_idx):
         pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs = batch
@@ -135,7 +135,7 @@ class QNetwork(pl.LightningModule):
         
         # compute the individual losses
         idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
-        classification_loss = self._large_margin_classification_loss(q_values, action)
+        classification_loss = self._large_margin_classification_loss(q_values, action).mean()
         one_step_loss = self.loss_fn(q_values[idcs, action], reward + self.hparams.discount_factor * target_next_q_values[idcs, base_next_action])
         n_step_loss = self.loss_fn(q_values[idcs, action], n_step_reward + (self.hparams.discount_factor ** self.hparams.n) * target_n_step_q_values[idcs, base_n_step_action])
 
