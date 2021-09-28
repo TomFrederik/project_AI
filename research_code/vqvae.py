@@ -314,7 +314,7 @@ def cli_main():
     parser.add_argument("--num_embeddings", type=int, default=32, help="vocabulary size; number of possible discrete states")
     parser.add_argument("--embedding_dim", type=int, default=32, help="size of the vector of the embedding of each discrete token")
     parser.add_argument("--n_hid", type=int, default=64, help="number of channels controlling the size of the model")
-# dataloader related
+    # dataloader related
     parser.add_argument("--data_dir", type=str, default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument("--env_name", type=str, default='MineRLTreechopVectorObf-v0')
     parser.add_argument("--batch_size", type=int, default=20)
@@ -323,12 +323,16 @@ def cli_main():
     parser.add_argument('--version', default=None, type=int, help='Version of model, if training is resumed from checkpoint')
     #other args
     parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerl/run_logs')
+    parser.add_argument('--suffix', type=str, default='')
     # done!
     args = parser.parse_args()
     # -------------------------------------------------------------------------
 
     # make sure that relevant dirs exist
     run_name = f'VQVAE/{args.env_name}'
+    if args.suffix != '':
+        run_name = run_name + '/' + args.suffix
+        
     log_dir = os.path.join(args.log_dir, run_name)
     os.makedirs(args.log_dir, exist_ok=True)
     print(f'\nSaving logs and model to {log_dir}')

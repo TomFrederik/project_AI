@@ -63,17 +63,17 @@ class MemoryDataset(torch.utils.data.Dataset):
         self.combined_memory.update_td_errors(batch_idcs, updated_td_errors)
         
 class CombinedMemory(object):
-    def __init__(self, agent_memory_capacity, n_step, gamma, p_offset, alpha, beta):
+    def __init__(self, agent_memory_capacity, n_step, discount_factor, p_offset, alpha, beta):
         '''
         Class to combine expert and agent memory
         '''
         self.n_step = n_step
-        self.gamma = gamma
+        self.discount_factor = discount_factor
         self.beta = beta
         self.alpha = alpha
         self.memory_dict = {
-            'expert':ReplayMemory(None, n_step, gamma, p_offset['expert'], expert=True),
-            'agent':ReplayMemory(agent_memory_capacity, n_step, gamma, p_offset['agent'], expert=False)
+            'expert':ReplayMemory(None, n_step, discount_factor, p_offset['expert'], expert=True),
+            'agent':ReplayMemory(agent_memory_capacity, n_step, discount_factor, p_offset['agent'], expert=False)
         }
         self.concat_memo = np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])
     
@@ -131,9 +131,9 @@ class CombinedMemory(object):
 
 class ReplayMemory(object):
 
-    def __init__(self, capacity, n_step, gamma, p_offset, expert=False):
+    def __init__(self, capacity, n_step, discount_factor, p_offset, expert=False):
         self.n_step = n_step
-        self.gamma = gamma
+        self.discount_factor = discount_factor
         self.p_offset = p_offset
         self.memory = deque([],maxlen=capacity)
         self.expert = int(expert)
@@ -150,12 +150,12 @@ class ReplayMemory(object):
         Adds all transitions within an episode to the memory.
         '''
         assert len(obs) > self.n_step, f"Expected len(obs) > self.n_step, but are {len(obs)} and {self.n_step}!"
-        discount_array = np.array([self.gamma ** i for i in range(self.n_step)])
+        discount_array = np.array([self.discount_factor ** i for i in range(self.n_step)])
 
         for t in range(len(obs)-self.n_step):
             state = obs[t]
             action = actions[t]
-            reward = rewards[t]
+            reward = np.log(1 + rewards[t])
             td_error = td_errors[t]
             
             if t + self.n_step < len(obs):
@@ -217,8 +217,8 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
     return combined_memory
 
 def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, training_steps_per_iteration,
-         lr, n_step, capacity, gamma, action_repeat, epsilon, batch_size, num_expert_episodes, data_dir, save_dir,
-         alpha, beta_0, agent_p_offset, expert_p_offset):
+         lr, n_step, capacity, discount_factor, action_repeat, epsilon, batch_size, num_expert_episodes, data_dir, save_dir,
+         alpha, beta_0, agent_p_offset, expert_p_offset, load_from_statedict):
     
     torch.manual_seed(1337)
     np.random.seed(1337)
@@ -238,7 +238,11 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     start = time()
 
     # set up model
-    q_net = QNetwork.load_from_checkpoint(model_path).to(device)
+    if load_from_statedict:
+        raise NotImplementedError
+        #q_net = torch.load(model_path).to(device)
+    else:
+        q_net = QNetwork.load_from_checkpoint(model_path).to(device)
     
     # set up optimization
     optimizer = torch.optim.AdamW(q_net.parameters(), lr=lr)
@@ -250,7 +254,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     
     # init memory
     beta = beta_0
-    combined_memory = CombinedMemory(capacity, n_step, gamma, {'agent':agent_p_offset, 'expert':expert_p_offset}, alpha, beta)
+    combined_memory = CombinedMemory(capacity, n_step, discount_factor, {'agent':agent_p_offset, 'expert':expert_p_offset}, alpha, beta)
     # init expert memory
     combined_memory = load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combined_memory)
     
@@ -336,7 +340,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
                 # record td_error
                 #time1 = time()
-                td_error_list.append(np.abs(rew + gamma * q_net(obs_pov, obs_vec, target=True)[0].squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
+                td_error_list.append(np.abs(rew + discount_factor * q_net(obs_pov, obs_vec, target=True)[0].squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
                 #print(f'Computing td_error took {time()-time1}s')
                         
                 # bookkeeping
@@ -354,6 +358,11 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         print('\nAdding episode to memory...')
         dataset.add_episode(obs_list, action_list, np.array(rew_list), td_error_list, memory_id='agent')
         
+        # init dataloader
+        sampler = torch.utils.data.WeightedRandomSampler(dataset.weights, training_steps_per_iteration*batch_size, replacement=True)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=6, pin_memory=True)
+
+
         # perform k updates
         print(f'\nPerforming {training_steps_per_iteration} parameter updates...')
         total_loss = 0
@@ -362,31 +371,28 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         # go to train mode
         q_net.train()
 
-        for i in tqdm(range(training_steps_per_iteration)):
-            batch_idcs = torch.multinomial(torch.from_numpy(dataset.weights), replacement=False, num_samples=batch_size)
-
+        for batch in tqdm(iter(dataloader)):
             # unpack batch
             #time1 = time()
-            batch = [dataset[idx] for idx in batch_idcs]
-            state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights, expert_mask = zip(*batch)
+            state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights, expert_mask = batch
             #print(f'Unpacking batch took {time()-time1}s')
 
-            pov, vec = map(lambda x: np.array(x), zip(*state))
-            next_pov, next_vec = map(lambda x: np.array(x), zip(*next_state))
-            n_step_pov, n_step_vec = map(lambda x: np.array(x), zip(*n_step_state))
+            pov, vec = state
+            next_pov, next_vec = next_state
+            n_step_pov, n_step_vec = n_step_state
 
             # prepare tensors
-            pov = torch.from_numpy(pov).to(device)
-            vec = torch.from_numpy(vec).to(device)
-            next_pov = torch.from_numpy(next_pov).to(device)
-            next_vec = torch.from_numpy(next_vec).to(device)
-            n_step_pov = torch.from_numpy(n_step_pov).to(device)
-            n_step_vec = torch.from_numpy(n_step_vec).to(device)
-            reward = torch.from_numpy(np.array(reward)).to(device)
-            n_step_reward = torch.from_numpy(np.array(n_step_reward)).to(device)
-            action = torch.from_numpy(np.array(action)).to(device)
-            weights = torch.from_numpy(np.array(weights)).to(device)
-            expert_mask = torch.from_numpy(np.array(expert_mask)).to(device)
+            pov = pov.to(device)
+            vec = vec.to(device)
+            next_pov = next_pov.to(device)
+            next_vec = next_vec.to(device)
+            n_step_pov = n_step_pov.to(device)
+            n_step_vec = n_step_vec.to(device)
+            reward = reward.to(device)
+            n_step_reward = n_step_reward.to(device)
+            action = action.to(device)
+            weights = weights.to(device)
+            expert_mask = expert_mask.to(device)
             
             # compute q values and choose actions
             q_values = q_net(pov, vec)[0]
@@ -401,10 +407,10 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
             selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
 
-            one_step_td_errors = reward + gamma * selected_next_q_values - selected_q_values
+            one_step_td_errors = reward + discount_factor * selected_next_q_values - selected_q_values
             one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
             
-            n_step_td_errors = reward + (gamma ** n_step) * selected_n_step_q_values - selected_q_values
+            n_step_td_errors = reward + (discount_factor ** n_step) * selected_n_step_q_values - selected_q_values
             n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling
 
             loss = one_step_loss + n_step_loss 
@@ -435,6 +441,9 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         print('\nUpdating beta...')
         beta = min(beta + 0.01, 1)
         dataset.update_beta(beta)
+        print('\nUpdating dataloader...')
+        sampler = torch.utils.data.WeightedRandomSampler(dataset.weights, training_steps_per_iteration*batch_size, replacement=True)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=6, pin_memory=True)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -454,10 +463,11 @@ if __name__ == '__main__':
     parser.add_argument('--beta_0', type=float, default=0.6, help='Initial PER Importance Sampling exponent')
     parser.add_argument('--agent_p_offset', type=float, default=0.001)
     parser.add_argument('--expert_p_offset', type=float, default=1)
-    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--discount_factor', type=float, default=0.99)
     parser.add_argument('--capacity', type=int, default=20000)
     parser.add_argument('--training_steps_per_iteration', type=int, default=100)
     parser.add_argument('--model_path', help='Path to the (pretrained) DQN')
+    parser.add_argument('--load_from_statedict', action='store_true', help='loads model from state dict instead, used when continuing training')
     
     args = parser.parse_args()
     
