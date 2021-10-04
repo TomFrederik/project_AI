@@ -1,6 +1,7 @@
 vecobs_analysis/
 action_analysis/
 data/
+experiment_logs/
 shared/
 logs/
 .gradle/

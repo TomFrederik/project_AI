@@ -1,23 +1,19 @@
-import visual_models
-import datasets
+from time import time
+import os
+import argparse
+import math
 
 import torch
 from torch.utils.data import DataLoader, random_split
 from torchvision.utils import make_grid
-
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
-
-
 import numpy as np
-from time import time
-import os
 import einops
-import argparse
-import math
 
-# for debugging
-torch.autograd.set_detect_anomaly(True)
+from vae_model import VAE
+import datasets
+
 # -----------------------------------------------------------------------------
 def cos_anneal(e0, e1, t0, t1, e):
     """ ramp from (e0, t0) -> (e1, t1) through a cosine schedule based on e \in [e0, e1] """
@@ -112,9 +108,7 @@ def train_VAE(
     log_dir, 
     latent_dim, 
     n_hid,
-    n_init,
-    load_from_checkpoint, 
-    version
+    n_init
 ):
     pl.seed_everything(1337)
 
@@ -135,12 +129,7 @@ def train_VAE(
     }
     
     # init model
-    if load_from_checkpoint:
-        checkpoint = os.path.join(log_dir, 'lightning_logs', 'version_'+str(version), 'checkpoints', 'last.ckpt')
-        print(f'\nLoading model from {checkpoint}')
-        model = visual_models.VAE.load_from_checkpoint(checkpoint)
-    else:
-        model = visual_models.VAE(encoder_kwargs, decoder_kwargs, lr)
+    model = VAE(encoder_kwargs, decoder_kwargs, lr)
     
     # load data
     train_data = datasets.BufferedBatchDataset(env_name, data_dir, batch_size, epochs)
@@ -169,17 +158,15 @@ if __name__=='__main__':
 
     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
-    parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--env_name', default='MineRLNavigateDenseVectorObf-v0')
     parser.add_argument('--batch_size', default=20, type=int)
-    parser.add_argument('--latent_dim', default=80, type=int)
-    parser.add_argument('--n_hid', default=5, type=int)
-    parser.add_argument('--n_init', default=210, type=int)
+    parser.add_argument('--latent_dim', default=32, type=int)
+    parser.add_argument('--n_hid', default=64, type=int)
+    parser.add_argument('--n_init', default=64, type=int)
     parser.add_argument('--epochs', default=1, type=int)
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
     parser.add_argument('--eval_freq', default=1, type=int, help='How often to reconstruct images for tensorboard')
     parser.add_argument('--save_freq', default=100, type=int, help='How often to save model')
-    parser.add_argument('--load_from_checkpoint', default=False, action='store_true')
-    parser.add_argument('--version', default=0, type=int, help='Version of model, if training is resumed from checkpoint')
 
     args = vars(parser.parse_args())
 

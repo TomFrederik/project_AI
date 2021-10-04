@@ -16,7 +16,7 @@ ENVS = ['MineRLObtainIronPickaxeDenseVectorObf-v0', 'MineRLObtainDiamondDenseVec
         'MineRLTreechopVectorObf-v0', 'MineRLObtainDiamondVectorObf-v0', 'MineRLObtainIronPickaxeVectorObf-v0']
 
         
-def extract_data(env_name, num_samples, data_dir=None, save_dir='./numpy_data'):
+def extract_data(env_name, num_samples=0, data_dir=None, save_dir='./numpy_data'):
     
     # make sure data_dir exists
     if data_dir is None:
@@ -52,6 +52,8 @@ def get_data(env_name, num_samples=0, data_dir=None):
     '''
     pass num_samples = 0 to load all available data
     '''
+    # download data
+    #minerl.data.download(environment=env_name, directory=data_dir)
     
     # load data
     data = minerl.data.make(env_name,  data_dir=data_dir)
@@ -118,114 +120,6 @@ class TrajectoryData(Dataset):
         rew = np.array(rew).astype(np.float32)
         
         return pov_obs, vec_obs, act, rew
-
-
-class RewardData(IterableDataset):
-
-    def __init__(self, env_name, data_dir, num_workers=1, upsample=False, backfill=False, backfill_discount=0.99):
-        '''
-        Dataset to learn to predict reward given vec_obs
-        '''
-        super().__init__()
-
-        # load data
-        self.data = minerl.data.make(env_name, data_dir)
-        
-        self.names = self.data.get_trajectory_names()
-        shuffle(self.names)
-        worker_names = [self.names[i:len(self.names)//num_workers*(i+1)] for i in range(num_workers)]
-        self.iter_per_worker = [iter(worker_names[i]) for i in range(num_workers)]
-    def backfill(self, rew, starts, gamma):
-        for i in range(len(rew)-2, -1, -1):
-            if starts[i+1] == 1:
-                rew[i] = rew[i]
-            else:
-                rew[i] += gamma*rew[i+1]
-        return rew
-
-    def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        worker_id = worker_info.id
-
-        # load traj
-        obs, _, rew, *_ = zip(*self.data.load_data(next(self.iter_per_worker[worker_id])))
-
-        # convert to np float 32
-        vec_obs = np.array([o['vector'] for o in obs]).astype(np.float32)
-        rew = np.array(rew).astype(np.float32)
-        
-        yield vec_obs, rew
-
-
-'''
-class DynamicsData(Dataset):
-
-    def __init__(self, env_name, data_dir, seq_len=4, num_data=0):
-
-        super().__init__()
-
-        print(f'\nLoading data of {env_name} from {data_dir}..')
-        # load data
-        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        actions, pov_obs, vec_obs, rewards, traj_starts = data['actions'], data['pov_obs'], data['vec_obs'], data['rewards'], data['traj_starts'] 
-
-        num_frames = seq_len
-        print(f'\nNumber of frames (conditioning + sequence) = {num_frames}')
-        
-        new_actions = []
-        new_pov_obs = []
-        new_vec_obs = []
-        new_rewards = []
-
-        # traverse backwards through trajectories
-        n_data = 0
-        cur_frame = len(traj_starts)-1-num_frames
-        done = False
-        while cur_frame >= 0:
-            if cur_frame < 0:
-                break
-            
-            # don't skip last frames in an episode
-            if 1 in traj_starts[cur_frame:cur_frame+num_frames]:
-                for i in range(num_frames):
-                    if traj_starts[cur_frame + i] == 1:
-                        cur_frame = cur_frame + i - num_frames
-                        break
-                continue
-            
-            new_actions.append(actions[cur_frame:cur_frame+num_frames])
-            new_pov_obs.append(pov_obs[cur_frame:cur_frame+num_frames])
-            new_vec_obs.append(vec_obs[cur_frame:cur_frame+num_frames])
-            new_rewards.append(rewards[cur_frame:cur_frame+num_frames])
-            
-            # check if enough data has been collected
-            if num_data > 0:
-                n_data += 1
-                if n_data >= num_data:
-                    break
-
-            # decrease frames
-            cur_frame -= num_frames
-
-        self.actions = np.array(new_actions)
-        self.pov_obs = np.array(new_pov_obs)
-        self.vec_obs = np.array(new_vec_obs)
-        self.rewards = np.array(new_rewards)
-
-    def __len__(self):
-        return len(self.actions)
-    
-    def __getitem__(self, idx):
-        # transform image to float array
-        pov = (self.pov_obs[idx].astype(np.float32) / 255)
-        pov = einops.rearrange(pov, 't h w c -> t c h w')
-
-        vec_obs = self.vec_obs[idx].astype(np.float32)
-        act = self.actions[idx].astype(np.float32)
-        rew = self.rewards[idx].astype(np.float32)
-
-        return pov, vec_obs, act, rew
-'''
 
 class DynamicsData(IterableDataset):
     def __init__(self, env_name, data_dir, seq_len, batch_size):
@@ -325,7 +219,8 @@ class PretrainQNetIterableData(IterableDataset):
         pov_obs, vec_obs = [item['pov'] for item in obs], [item['vector'] for item in obs]
         pov_obs = einops.rearrange(np.array(pov_obs), 'b h w c -> b c h w').astype(np.float32) / 255
         vec_obs = np.array(vec_obs).astype(np.float32)
-        rewards = np.log(1 + np.array(rewards).astype(np.float32)) # log for better scaled rewards
+        #rewards = np.log(1 + np.array(rewards).astype(np.float32)) # log for better scaled rewards
+        rewards = np.array(rewards).astype(np.float32)
         actions = np.array([ac['vector'] for ac in actions]).astype(np.float32)
 
         # compute actions
@@ -349,97 +244,6 @@ class PretrainQNetIterableData(IterableDataset):
             worker_id = torch.utils.data.get_worker_info().id
             return self._get_stream_of_trajectories(self.names_per_worker[worker_id])
         
-       
-class PretrainQNetData(Dataset):
-
-    def __init__(self, env_name, data_dir, centroids, n, gamma, num_data=0):
-        super().__init__()
-
-        print(f'\nLoading data of {env_name} from {data_dir}..')
-        # load data
-        data = np.load(os.path.join(data_dir, env_name+'_data.npz'))
-        pov_obs, vec_obs, actions, rewards, traj_starts = data['pov_obs'], data['vec_obs'], data['actions'], data['rewards'], data['traj_starts'] 
-
-        pov_obs_list = []
-        vec_obs_list = []
-        actions_list = []
-        rewards_list = []
-        next_pov_obs_list = []
-        next_vec_obs_list = []
-        n_step_rewards_list = []
-        n_step_pov_obs_list = []
-        n_step_vec_obs_list = []
-
-        discount_array = np.array([gamma ** i for i in range(n)])
-
-        # traverse backwards through trajectories
-        n_data = 0
-        cur_frame = len(traj_starts)-1-n
-        done = False
-        while cur_frame >= 0:
-            if cur_frame < 0:
-                break
-            
-            # skip last frames in an episode
-            # TODO make this better, so that you still use the last frames?
-            if 1 in traj_starts[cur_frame:cur_frame + n]:
-                for i in range(n):
-                    if traj_starts[cur_frame + i] == 1:
-                        cur_frame = cur_frame + i - n
-                        break
-                continue
-            
-            pov_obs_list.append(pov_obs[cur_frame])            
-            vec_obs_list.append(vec_obs[cur_frame])
-            actions_list.append(np.argmin(((centroids - actions[cur_frame][None,:]) ** 2).sum(axis=1)))
-            rewards_list.append(rewards[cur_frame])
-            next_pov_obs_list.append(pov_obs[cur_frame+1])            
-            next_vec_obs_list.append(vec_obs[cur_frame+1])
-            n_step_rewards_list.append(np.sum(rewards[cur_frame:cur_frame+n] * discount_array))
-            n_step_pov_obs_list.append(pov_obs[cur_frame+n])            
-            n_step_vec_obs_list.append(vec_obs[cur_frame+n])
-            
-            # check if enough data has been collected
-            if num_data > 0:
-                n_data += 1
-                if n_data >= num_data:
-                    break
-            cur_frame -= 1
-
-        self.pov_obs = np.array(pov_obs_list)
-        self.vec_obs = np.array(vec_obs_list)
-        self.actions = np.array(actions_list)
-        self.rewards = np.array(rewards_list)
-        self.next_pov_obs = np.array(next_pov_obs_list)
-        self.next_vec_obs = np.array(next_vec_obs_list)
-        self.n_step_rewards = np.array(n_step_rewards_list)
-        self.n_step_pov_obs = np.array(n_step_pov_obs_list)
-        self.n_step_vec_obs = np.array(n_step_vec_obs_list)
-
-    def __len__(self):
-        return len(self.pov_obs)
-    
-    def __getitem__(self, idx):
-        # transform image to float array
-        pov = (self.pov_obs[idx].astype(np.float32) / 255)
-        pov = einops.rearrange(pov, 'h w c -> c h w')
-        
-        next_pov = (self.next_pov_obs[idx].astype(np.float32) / 255)
-        next_pov = einops.rearrange(next_pov, 'h w c -> c h w')
-        
-        n_step_pov = (self.n_step_pov_obs[idx].astype(np.float32) / 255)
-        n_step_pov = einops.rearrange(n_step_pov, 'h w c -> c h w')
-        
-        vec_obs = self.vec_obs[idx].astype(np.float32)
-        next_vec_obs = self.next_vec_obs[idx].astype(np.float32)
-        n_step_vec_obs = self.n_step_vec_obs[idx].astype(np.float32)
-        
-        action = self.actions[idx].astype(np.int64)
-        
-        reward = self.rewards[idx].astype(np.float32)
-        n_step_reward = self.n_step_rewards[idx].astype(np.float32)
-        
-        return pov, vec_obs, action, reward, next_pov, next_vec_obs, n_step_reward, n_step_pov, n_step_vec_obs
 
 class StateVQVAEData(Dataset):
     def __init__(self, env_name, data_dir, num_workers, num_trajs):

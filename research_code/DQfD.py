@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from torch.utils.tensorboard import SummaryWriter
 
-from PretrainDQN import ConvFeatureExtractor, QNetwork
+from DQfD_pretrain import ConvFeatureExtractor, QNetwork
 
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'n_step_state', 'n_step_reward', 'td_error', 'expert'))
@@ -155,7 +155,7 @@ class ReplayMemory(object):
         for t in range(len(obs)-self.n_step):
             state = obs[t]
             action = actions[t]
-            reward = np.log(1 + rewards[t])
+            reward = rewards[t]
             td_error = td_errors[t]
             
             if t + self.n_step < len(obs):
@@ -191,6 +191,7 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
     data = minerl.data.make(env_name,  data_dir=data_dir)
     trajectory_names = data.get_trajectory_names()
     random.shuffle(trajectory_names)
+    print(f'{len(trajectory_names) = }')
 
     # Add trajectories to the data until we reach the required DATA_SAMPLES.
     for i, trajectory_name in enumerate(trajectory_names):
@@ -222,6 +223,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
     
     torch.manual_seed(1337)
     np.random.seed(1337)
+    random.seed(1337)
 
     # set save dir
     save_dir = os.path.join(save_dir, 'DQfD', env_name, str(int(time())))
@@ -371,7 +373,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         # go to train mode
         q_net.train()
 
-        for batch in tqdm(iter(dataloader)):
+        for i, batch in tqdm(enumerate(dataloader)):
             # unpack batch
             #time1 = time()
             state, next_state, n_step_state, action, reward, n_step_reward, batch_idcs, weights, expert_mask = batch
@@ -397,26 +399,31 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             # compute q values and choose actions
             q_values = q_net(pov, vec)[0]
             next_q_values = q_net(next_pov, next_vec, target=True).detach()
-            base_next_action = torch.argmax(next_q_values, dim=1)
+            base_next_action = torch.argmax(q_net(next_pov, next_vec)[0], dim=1)
             n_step_q_values = q_net(n_step_pov, n_step_vec, target=True).detach()
-            base_n_step_action = torch.argmax(n_step_q_values, dim=1)
+            base_n_step_action = torch.argmax(q_net(n_step_pov, n_step_vec)[0], dim=1)
+
             
             # compute losses
             idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
-            selected_q_values = torch.gather(q_values, 1, action[:,None])
-            selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
-            selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
+            action_q_values = q_values[idcs, action]
+            next_q_values = next_q_values[idcs, base_next_action]
+            n_step_q_values = n_step_q_values[idcs, base_n_step_action]
 
-            one_step_td_errors = reward + discount_factor * selected_next_q_values - selected_q_values
+            one_step_td_errors = reward + discount_factor * next_q_values - action_q_values
             one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
             
-            n_step_td_errors = reward + (discount_factor ** n_step) * selected_n_step_q_values - selected_q_values
+            n_step_td_errors = reward + (discount_factor ** n_step) * n_step_q_values - action_q_values
             n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling
 
-            loss = one_step_loss + n_step_loss 
-            J_E = (expert_mask * q_net._large_margin_classification_loss(q_values, action)).mean()
-            loss = loss + J_E
+            J_E = (expert_mask * q_net._large_margin_classification_loss(q_values, action)).sum() / expert_mask.sum() # only average over actual expert demos
+            loss = one_step_loss + n_step_loss + J_E
             total_loss += loss
+
+            writer.add_scalar('Training/one_step_loss', one_step_loss, global_step=(num_episodes-1)*training_steps_per_iteration + i)
+            writer.add_scalar('Training/n_step_loss', n_step_loss, global_step=(num_episodes-1)*training_steps_per_iteration + i)
+            writer.add_scalar('Training/classification_loss', J_E, global_step=(num_episodes-1)*training_steps_per_iteration + i)
+            writer.add_scalar('Training/ratio_expert_to_agent', expert_mask.detach().float().mean(), global_step=(num_episodes-1)*training_steps_per_iteration + i)
             
             # update td errors
             # update towards n_step td error since that ought to be a more accurate estimate of the 'true' error
@@ -429,7 +436,7 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
         mean_loss = total_loss.item() / training_steps_per_iteration
         print(f'\nMean loss = {mean_loss}')
-        writer.add_scalar('Training/Loss', mean_loss, global_step=num_episodes)
+        writer.add_scalar('Training/Loss', mean_loss, global_step=(num_episodes-1)*training_steps_per_iteration)
 
         cur_dur = time()-start
         print(f'Time elapsed so far: {cur_dur // 60}m {cur_dur % 60:.1f}s')
@@ -439,7 +446,8 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
         print('\nSaving model')
         torch.save(q_net.state_dict(), save_path)
         print('\nUpdating beta...')
-        beta = min(beta + 0.01, 1)
+        beta = min(beta + (1-beta_0)/max_env_steps, 1)
+        writer.add_scalar('Training/Beta', beta, global_step=num_episodes*training_steps_per_iteration)
         dataset.update_beta(beta)
         print('\nUpdating dataloader...')
         sampler = torch.utils.data.WeightedRandomSampler(dataset.weights, training_steps_per_iteration*batch_size, replacement=True)
@@ -447,16 +455,16 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--env_name', default='MineRLNavigateDenseVectorObf-v0')
     parser.add_argument('--centroids_path', default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--save_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
-    parser.add_argument('--max_episode_len', type=int, default=4000)
-    parser.add_argument('--max_env_steps', type=int, default=2**20)
-    parser.add_argument('--num_expert_episodes', type=int, default=10)
+    parser.add_argument('--max_episode_len', type=int, default=5000)
+    parser.add_argument('--max_env_steps', type=int, default=1000000)
+    parser.add_argument('--num_expert_episodes', type=int, default=194)
     parser.add_argument('--n_step', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=100)
-    parser.add_argument('--action_repeat', type=int, default=5)
+    parser.add_argument('--action_repeat', type=int, default=1)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--epsilon', type=float, default=0.01)
     parser.add_argument('--alpha', type=float, default=0.4, help='PER exponent')
@@ -464,9 +472,9 @@ if __name__ == '__main__':
     parser.add_argument('--agent_p_offset', type=float, default=0.001)
     parser.add_argument('--expert_p_offset', type=float, default=1)
     parser.add_argument('--discount_factor', type=float, default=0.99)
-    parser.add_argument('--capacity', type=int, default=20000)
-    parser.add_argument('--training_steps_per_iteration', type=int, default=100)
-    parser.add_argument('--model_path', help='Path to the (pretrained) DQN')
+    parser.add_argument('--capacity', type=int, default=50000)
+    parser.add_argument('--training_steps_per_iteration', type=int, default=200)
+    parser.add_argument('--model_path', help='Path to the (pretrained) DQN', required=True)
     parser.add_argument('--load_from_statedict', action='store_true', help='loads model from state dict instead, used when continuing training')
     
     args = parser.parse_args()

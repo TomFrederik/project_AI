@@ -19,7 +19,7 @@ def main(env_name, num_runs, centroids_path, model_path, action_repeat, video_di
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # load model
-    model = PretrainDQN.PretrainQNetwork.load_from_checkpoint(model_path).to(device)
+    model = PretrainDQN.QNetwork.load_from_checkpoint(model_path).to(device)
     model.eval()
 
     # load centroids
