@@ -13,7 +13,7 @@ from reward_model import RewardMLP
 
 from time import time
 
-vae_model_by_str = {
+visual_model_by_str = {
     'vae':visual_models.VAE,
     'vqvae':vqvae.VQVAE
 }
@@ -43,8 +43,8 @@ class MDN_RNN(pl.LightningModule):
         scheduler_kwargs, 
         seq_len, 
         num_components, 
-        VAE_path, 
-        VAE_class='vae', 
+        visual_model_path, 
+        visual_model_cls='vae', 
         temp=1, 
         conditioning_len=0,
         curriculum_threshold=3.0, 
@@ -55,25 +55,25 @@ class MDN_RNN(pl.LightningModule):
         # save params
         self.save_hyperparameters()
 
-        # init curriculum
+        # init curriculum # TODO: maybe remove this
         self._init_curriculum(curriculum_start=curriculum_start)
         print(f'\nCurriculum starts at {self.curriculum[self.curriculum_step]} step forecast')
         
         # load VAE
-        self.VAE = vae_model_by_str[VAE_class].load_from_checkpoint(VAE_path)
-        self.VAE.eval()
+        self.visual_model = visual_model_by_str[visual_model_class].load_from_checkpoint(visual_model_path)
+        self.visual_model.eval() # TODO: maybe make this optional for finetuning
         
-        if self.hparams.VAE_class == 'vqvae':
+        if self.hparams.visual_model_class == 'vqvae':
             self.latent_dim = self.VAE.hparams.args.embedding_dim
             self.num_embeddings = self.VAE.hparams.args.num_embeddings
             print(f'\nlatent_dim = {self.latent_dim}')
             print(f'\nnum_embeddings = {self.num_embeddings}')
 
-        elif self.hparams.VAE_class == 'vae':
-            self.latent_dim = self.VAE.hparams.encoder_kwargs['latent_dim']
+        elif self.hparams.visual_model_class == 'vae':
+            self.latent_dim = self.visual_model.hparams.encoder_kwargs['latent_dim']
             print(f'\nlatent_dim = {self.latent_dim}')
             
-        dummy_sample, *_ = self.VAE.encode_only(torch.ones(2,3,64,64).float().to(self.VAE.device))
+        dummy_sample, *_ = self.visual_model.encode_only(torch.ones(2,3,64,64).float().to(self.visual_model.device))
         print(f'{dummy_sample.shape = }')
         self.latent_h = dummy_sample.shape[-1]
         self.latent_size = np.prod(dummy_sample.shape[2:])
@@ -87,7 +87,7 @@ class MDN_RNN(pl.LightningModule):
                 nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1, stride=2), # 4 -> 2
                 nn.GELU(),
                 nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
-            )
+        )
         
         dummy_sample = self.conv_net(dummy_sample)
 

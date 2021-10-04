@@ -128,7 +128,6 @@ class CombinedMemory(object):
         self._update_weights()
         #print(f'Time to update weights = {time() - time1:.2f}s')
 
-
 class ReplayMemory(object):
 
     def __init__(self, capacity, n_step, gamma, p_offset, expert=False):
@@ -390,19 +389,22 @@ def main(env_name, max_episode_len, model_path, max_env_steps, centroids_path, t
             
             # compute q values and choose actions
             q_values = q_net(pov, vec)[0]
-            next_q_values = q_net(next_pov, next_vec, target=True).detach()
-            base_next_action = torch.argmax(next_q_values, dim=1)
+            next_target_q_values = q_net(next_pov, next_vec, target=True).detach()
+            next_q_values = q_net(next_pov, next_vec).detach()
+            next_action = torch.argmax(next_q_values, dim=1)
             n_step_q_values = q_net(n_step_pov, n_step_vec, target=True).detach()
-            base_n_step_action = torch.argmax(n_step_q_values, dim=1)
+            n_step_action = torch.argmax(n_step_q_values, dim=1)
             
             # compute losses
             idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
-            selected_q_values = torch.gather(q_values, 1, action[:,None])
-            selected_next_q_values = torch.gather(next_q_values, 1, base_next_action[:,None])
-            selected_n_step_q_values = torch.gather(n_step_q_values, 1, base_n_step_action[:,None])
+            selected_q_values = q_values[idcs, action]
+            selected_next_q_values = next_target_q_values[idcs, next_action]
+            selected_n_step_q_values = n_step_q_values[idcs, n_step_action]
 
-            one_step_td_errors = reward + gamma * selected_next_q_values - selected_q_values
-            one_step_loss = ((one_step_td_errors ** 2) * weights).mean() # importance sampling scaling
+            td_error = reward + gamma * next_q_values[idcs, next_action] - q_values[idcs, action]
+
+            J_DQ = (reward + gamma * selected_next_q_values - selected_q_values)**2
+            one_step_loss = (J_DQ * weights).mean() # importance sampling scaling
             
             n_step_td_errors = reward + (gamma ** n_step) * selected_n_step_q_values - selected_q_values
             n_step_loss = ((n_step_td_errors ** 2) * weights).mean() # importance sampling scaling

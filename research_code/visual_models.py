@@ -144,13 +144,24 @@ class VAEEncoder(nn.Module):
             nn.Conv2d(2*n_hid, 2*n_hid, 3, padding=1),
             nn.ReLU(),
             ResBlock(2*n_hid, 2*n_hid//4),
-            ResBlock(2*n_hid, 2*n_hid//4),
+            ResBlock(2*n_hid, 2*n_hid//4), # --> shape is (...., 16, 16)
+            nn.ReLU(),
+            nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1), # (.... 4, 4)
+            nn.ReLU(),
             Rearrange('b c h w -> (b h w) c'),
             nn.Linear(2*n_hid, 2*latent_dim)
         )
 
     def forward(self, x):
-        out = self.net(x)
+        #out = self.net(x)
+        print('\nEncoder:')
+        out = x
+        for m in self.net:
+            print(out.shape)
+            out = m(out)
+        print(out.shape)
         mean, log_std = torch.chunk(out, chunks=2, dim=-1)        
         return mean, log_std
 
@@ -162,7 +173,13 @@ class VAEDecoder(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(latent_dim, n_init),
-            Rearrange('(b h w) c -> b c h w', w=16, h=16),
+            Rearrange('(b h w) c -> b c h w', w=4, h=4),
+            nn.ReLU(),
+            nn.Conv2d(n_init, n_init, 3, padding=1),
+            nn.UpsamplingNearest2d((8,8)),
+            nn.Conv2d(n_init, n_init, 3, 1),
+            nn.UpsamplingNearest2d((16,16)),
+            nn.ReLU(),
             nn.Conv2d(n_init, 2*n_hid, 3, padding=1),
             nn.ReLU(),
             ResBlock(2*n_hid, 2*n_hid//4),
@@ -173,4 +190,11 @@ class VAEDecoder(nn.Module):
         )
 
     def forward(self, x):
-        return self.net(x)
+        print('\nDecoder:')
+        out = x
+        for m in self.net:
+            print(out.shape)
+            out = m(out)
+        print(out.shape)
+        return out
+        #return self.net(x)
