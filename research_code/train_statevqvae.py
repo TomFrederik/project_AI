@@ -52,7 +52,7 @@ class PredictionCallback(pl.Callback):
         if (pl_module.global_step+1) % self.every_n_batches == 0:
             self.predict_sequence(trainer, pl_module, pl_module.global_step+1)
 
-    def predict_sequence(self, trainer, pl_module, epoch):
+    def predict_sequence(self, trainer, pl_module:StateVQVAE, epoch):
         """
         Function that predicts sequence and generates images.
         Inputs:
@@ -65,7 +65,14 @@ class PredictionCallback(pl.Callback):
             self.sequence = list(map(lambda x: x.to(pl_module.device), self.sequence))
         
         # predict sequence
+        #extrapolate_input = {
+        #    'pov_obs':self.sequence[0][:,0][:,None],
+        #    'vec_obs':self.sequence[1][:,0][:,None],
+        #    'actions':self.sequence[2]
+        #}
+        #predictions, *_ = pl_module.extrapolate(**extrapolate_input)
         predictions, *_ = pl_module(*self.sequence)
+        
         predictions = torch.nn.functional.softmax(predictions[0], dim=2)
 
         print(f'{predictions.shape = }')
@@ -75,7 +82,7 @@ class PredictionCallback(pl.Callback):
         print(f'{ind_samples.shape = }')
         pov_samples = torch.nn.functional.embedding(ind_samples, pl_module.vqvae.quantizer.embed.weight)
         print(f'{pov_samples.shape = }')
-        pov_samples = einops.rearrange(pov_samples, '(b t h w) c -> (b t) c h w', b=B, t=T, c=C, h=H, w=W)
+        pov_samples = einops.rearrange(pov_samples, '(b t h w) c -> (b t) c h w', b=B, t=T, h=H, w=W)
         print(f'{pov_samples.shape = }')
         # reconstruct images
         pov_reconstruction = pl_module.vqvae.decode_only(pov_samples)
@@ -141,6 +148,7 @@ def main(
     lr, 
     epochs, 
     save_freq, 
+    img_callback_freq,
     log_dir, 
     num_workers, 
     load_from_checkpoint, 
@@ -157,6 +165,8 @@ def main(
     temp_decay_max_time,
     discard_priors,
     lstm_enc_input_size,
+    lstm_enc_hidden_size,
+    lstm_dec_hidden_size,
     max_seq_len
 ):
     pl.seed_everything(1337)
@@ -175,7 +185,7 @@ def main(
     os.makedirs(log_dir, exist_ok=True)
     print(f'\nSaving logs and model to {log_dir}')
 
-    dataset = StateVQVAEData(env_name, data_dir, num_workers, num_trajs) # TODO: Implement
+    dataset = StateVQVAEData(env_name, data_dir, num_workers, num_trajs) 
     
     train_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
     
@@ -193,6 +203,8 @@ def main(
         'vecobs_quantizer':vecobs_quantizer,
         'discard_priors':discard_priors,
         "lstm_enc_input_size":lstm_enc_input_size,
+        "lstm_enc_hidden_size":lstm_enc_hidden_size,
+        "lstm_dec_hidden_size":lstm_dec_hidden_size,
         "max_seq_len":max_seq_len
     }
     if load_from_checkpoint:
@@ -203,19 +215,17 @@ def main(
         model = StateVQVAE(**model_kwargs).to(device)
     
     callbacks = [ModelCheckpoint(monitor='Training/reconstruction_loss', mode='min', every_n_train_steps=save_freq, save_last=True)]
-    # TODO add callbacks for LR decay and beta ramp
     callbacks.append(DecayLR(lr_decay_max_time))
     if gumbel:
        callbacks.extend([DecayTemperature(temp_decay_max_time), RampBeta(ramp_beta_max_time)])
     
-    callbacks.append(PredictionCallback(dataset=dataset, every_n_batches=save_freq))
+    callbacks.append(PredictionCallback(dataset=dataset, every_n_batches=img_callback_freq))
 
     trainer = pl.Trainer(
         progress_bar_refresh_rate=1,
         log_every_n_steps=1,
         callbacks=callbacks,
         gpus=torch.cuda.device_count(),
-        accelerator='dp',
         default_root_dir=log_dir,
         max_epochs=epochs
     )
@@ -229,7 +239,7 @@ if __name__ == '__main__':
     parser.add_argument('--framevqvae', type=str, help='Path to the FrameVQVAE checkpoint')
     parser.add_argument('--action_quantizer', type=int, default=None, help='Version of the ActionVQVAE to use')
     parser.add_argument('--vecobs_quantizer', type=int, default=None, help='Version of the VecObsVQVAE to use')
-    parser.add_argument('--env_name', type=str, default='MineRLTreechopVectorObf-v0')
+    parser.add_argument('--env_name', type=str, default='MineRLNavigateDenseVectorObf-v0')
     parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data')
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--batch_size', type=int, default=1)
@@ -237,13 +247,16 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--num_trajs', type=int, default=0)
     parser.add_argument('--save_freq', type=int, default=100)
+    parser.add_argument('--img_callback_freq', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--version', type=int, default=0, help='Version of model, if training is resumed from checkpoint')
     parser.add_argument('--embedding_dim', type=int, default=64)
     parser.add_argument('--codebook_size', type=int, default=32)
-    parser.add_argument('--max_seq_len', type=int, default=100)
-    parser.add_argument('--lstm_enc_input_size', type=int, default=1024)
+    parser.add_argument('--max_seq_len', type=int, default=10)
+    parser.add_argument('--lstm_enc_input_size', type=int, default=512)
+    parser.add_argument('--lstm_enc_hidden_size', type=int, default=512)
+    parser.add_argument('--lstm_dec_hidden_size', type=int, default=512)
     parser.add_argument('--gumbel', action='store_true')
     parser.add_argument('--tau', type=float, default=1)
     parser.add_argument('--lr_decay_max_time', type=int, default=1200)
@@ -252,5 +265,7 @@ if __name__ == '__main__':
     parser.add_argument('--discard_priors', action='store_true')
     
     args = parser.parse_args()
+
+    assert args.gumbel, "Not using gumbel softmax is not implemented!"
     
     main(**vars(args))

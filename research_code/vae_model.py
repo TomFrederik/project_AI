@@ -4,7 +4,6 @@ import pytorch_lightning as pl
 import numpy as np
 from torch.optim import AdamW
 import torch.nn.functional as F
-
 import einops
 from einops.layers.torch import Rearrange
 
@@ -66,8 +65,18 @@ class VAE(pl.LightningModule):
         return sample, mean, torch.exp(log_std)
     
     def encode_with_grad(self, x):
-        #TODO
-        raise NotImplementedError
+        b, *_ = x.shape
+        mean, log_std = self.encoder(x-0.5)
+        h = int((mean.shape[0]//b) ** 0.5)
+        
+        # compute KL distance, i.e. regularization loss
+        L_regul = (0.5 * (torch.exp(2 * log_std) + mean ** 2 - 1 - 2 * log_std)).sum(dim=-1).mean()
+
+        mean = einops.rearrange(mean, '(b h w) c -> b c h w', b=b, h=h, w=h)
+        log_std = einops.rearrange(log_std, '(b h w) c -> b c h w', b=b, h=h, w=h)
+
+        sample = self.sample(mean, log_std)
+        return sample, L_regul, None, None
 
     @torch.no_grad()
     def decode_only(self, z):

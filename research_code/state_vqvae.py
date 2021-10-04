@@ -418,8 +418,8 @@ class StateVQVAE(pl.LightningModule):
         for i in range(len(predictions)):
             preds = predictions[i][0]
             targs = targets[i*self.hparams.max_seq_len:(i+1)*self.hparams.max_seq_len]
-            print(f"{preds.shape = }")
-            print(f"{targs.shape = }")
+            #print(f"{preds.shape = }")
+            #print(f"{targs.shape = }")
             reconstruction_loss = reconstruction_loss + self.loss_fn(preds, targs)
         loss = reconstruction_loss + latent_loss
         #print(f'attempting backward with sequence of length {pov_obs.shape[1]}...')
@@ -437,6 +437,75 @@ class StateVQVAE(pl.LightningModule):
                 self.log('Training/cluster_use', cluster_use, prog_bar=True)
         return loss
     
+    def extrapolate(self, pov_obs, vec_obs, actions, max_seq_len=None):
+        """
+        pov_obs - (B,1,3,64,64)
+        vec_obs - (B,1,64)
+        actions - (B,1,64)
+        """
+        if max_seq_len is None:
+            max_seq_len = self.hparams.max_seq_len
+        
+        assert pov_obs.shape[1:] == (1,3,64,64), f'shape is {pov_obs.shape}'
+        assert vec_obs.shape[1:] == (1,64), f'shape is {vec_obs.shape}'
+        assert actions.shape[1:] == (max_seq_len,64), f'shape is {actions.shape}, but expected {(max_seq_len, 64)}'
+        
+        B, T, C, H, W = pov_obs.shape
+        
+        # encode with frame vqvae
+        pov_obs, *_ = self._apply_frame_encoding(pov_obs)
+        assert pov_obs.shape[1:] == (1, self.vqvae.quantizer.embedding_dim, 16, 16), f"shape is {pov_obs.shape}"
+        print(f'{pov_obs.shape = }')
+        print(f'{vec_obs.shape = }')
+        print(f'{actions.shape = }')
+        #print('B, T, C, H, W = ', B, T, C, H, W)
+
+        # apply action vqvae
+        if self.action_quantizer is not None:
+            actions = einops.rearrange(self.action_quantizer.encode_only(einops.rearrange(actions, 'b t d -> (b t) d'))[0], '(b t) d -> b t d', b=B)
+        
+        # apply vec obs vqvae. If it was None, then this is the identity mapping
+        if self.vecobs_quantizer is not None:
+            vec_obs = einops.rearrange(self.vecobs_quantizer.encode_only(einops.rearrange(vec_obs, 'b t d -> (b t) d'))[0], '(b t) d -> b t d', b=B)
+
+        # encode all images
+        encoded_images = einops.rearrange(self.cnn_encoder(einops.rearrange(pov_obs, 'b t c h w -> (b t) c h w')), 'bt c h w -> bt (c h w)')
+        print(f'{encoded_images.shape = }')
+        print(f'{vec_obs.shape = }')
+        print(f'{actions.shape = }')
+        dec_lstm_input = torch.cat([einops.rearrange(encoded_images, '(b t) d -> b t d', t=T), vec_obs, actions[:,:-1]], dim=2)
+        encoded_images = self.first_projection(encoded_images)
+        encoded_images = einops.rearrange(encoded_images, '(b t) d -> b t d', b=B, t=T)
+
+        # create lstm input
+        #print(f'pre lstm starting proj: {torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1).shape}')
+        enc_first_hidden = self.lstm_starting_state_projection(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
+        #print(f'post lstm starting proj: {enc_first_hidden.shape}')
+        enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2)
+        
+        # initial prediction
+        predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence(
+            enc_lstm_input, 
+            dec_lstm_input, 
+            enc_first_hidden, 
+            enc_first_cell=None, 
+            dec_first_hidden=None, 
+            dec_first_cell=None
+        )
+        print(f'{predictions.shape}')
+        t = 2
+        while t < max_seq_len:
+            predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell) = self._predict_subsequence(
+            enc_lstm_input, 
+            dec_lstm_input, 
+            enc_last_hidden, 
+            enc_first_cell=enc_last_cell, 
+            dec_first_hidden=dec_last_hidden, 
+            dec_first_cell=dec_last_cell
+        )
+
+        all_predictions, frame_quantization_idcs[1:], latent_loss, all_ind
+
     def configure_optimizers(self):
         params = []
         for m in self.model_list:
