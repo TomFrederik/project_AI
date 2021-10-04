@@ -6,16 +6,16 @@ import matplotlib.pyplot as plt
 import torchdiffeq as teq
 import einops
 
-import visual_models
+from vae_model import VAE
 import util_models
-import vqvae
+from vqvae import VQVAE
 from reward_model import RewardMLP
 
 from time import time
 
 visual_model_by_str = {
-    'vae':visual_models.VAE,
-    'vqvae':vqvae.VQVAE
+    'vae':VAE,
+    'vqvae':VQVAE
 }
 
 EPS = 1e-10
@@ -42,8 +42,8 @@ class MDN_RNN(pl.LightningModule):
         optim_kwargs, 
         scheduler_kwargs, 
         seq_len, 
-        num_components, 
-        visual_model_path, 
+        num_components=5, 
+        visual_model_path='', 
         visual_model_cls='vae', 
         temp=1, 
         conditioning_len=0,
@@ -60,59 +60,30 @@ class MDN_RNN(pl.LightningModule):
         print(f'\nCurriculum starts at {self.curriculum[self.curriculum_step]} step forecast')
         
         # load VAE
-        self.visual_model = visual_model_by_str[visual_model_class].load_from_checkpoint(visual_model_path)
+        self.visual_model = visual_model_by_str[visual_model_cls].load_from_checkpoint(visual_model_path)
         self.visual_model.eval() # TODO: maybe make this optional for finetuning
         
-        if self.hparams.visual_model_class == 'vqvae':
-            self.latent_dim = self.VAE.hparams.args.embedding_dim
-            self.num_embeddings = self.VAE.hparams.args.num_embeddings
+        if self.hparams.visual_model_cls == 'vqvae':
+            self.latent_dim = self.visual_model.hparams.args.embedding_dim
+            self.num_embeddings = self.visual_model.hparams.args.num_embeddings
             print(f'\nlatent_dim = {self.latent_dim}')
             print(f'\nnum_embeddings = {self.num_embeddings}')
 
-        elif self.hparams.visual_model_class == 'vae':
+        elif self.hparams.visual_model_cls == 'vae':
             self.latent_dim = self.visual_model.hparams.encoder_kwargs['latent_dim']
             print(f'\nlatent_dim = {self.latent_dim}')
             
-        dummy_sample, *_ = self.visual_model.encode_only(torch.ones(2,3,64,64).float().to(self.visual_model.device))
-        print(f'{dummy_sample.shape = }')
-        self.latent_h = dummy_sample.shape[-1]
-        self.latent_size = np.prod(dummy_sample.shape[2:])
         
-        num_channels = dummy_sample.shape[1]
-        self.conv_net = nn.Sequential(
-                nn.Conv2d(in_channels=num_channels, out_channels=64, kernel_size=3, padding=1, stride=2), # 16 -> 8
-                nn.GELU(),
-                nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1, stride=2), # 8 -> 4
-                nn.GELU(),
-                nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1, stride=2), # 4 -> 2
-                nn.GELU(),
-                nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, padding=1, stride=2)#, # 2 -> 1
-        )
-        
-        dummy_sample = self.conv_net(dummy_sample)
-
-        self.pre_gru_size = np.prod(dummy_sample.shape[2:])
-        self.pre_gru_channels = dummy_sample.shape[1]
+        self.pre_gru_size = self.latent_dim
         print(f'\npre_gru_size (H*W) = {self.pre_gru_size}')
-        print(f'\nlatent_size (H*W) = {self.latent_size}')
         
         # set up model
-        self.gru_input_dim = self.pre_gru_channels * self.pre_gru_size + 64
+        self.gru_input_dim = self.pre_gru_size + 64 + 64 # 64 for action dim, 64 again for vecobs
         self.gru = nn.GRU(**gru_kwargs, input_size=self.gru_input_dim, batch_first=True)
 
         self.mdn_network = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=gru_kwargs['hidden_size'], out_channels=256, kernel_size=3, padding=1, stride=2, output_padding=1), # 1 -> 2
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, padding=1, stride=2, output_padding=1), # 2 -> 4
-            nn.GELU(),
-            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=3, padding=1, stride=2, output_padding=1), # 4 -> 8
-            nn.GELU(),
-            nn.ConvTranspose2d(
-                in_channels=64, out_channels=self.num_embeddings if self.hparams.VAE_class == 'vqvae' else self.latent_dim, 
-                kernel_size=3, padding=1, stride=2, output_padding=1
-                )  # 8 -> 16
+            nn.Linear(gru_kwargs['hidden_size'], num_components + num_components * 2 * self.latent_dim)
         )
-        
         
         self.ce_loss = nn.CrossEntropyLoss()
 
@@ -121,20 +92,38 @@ class MDN_RNN(pl.LightningModule):
         pov, vec, actions, _ = batch
 
         # make predictions
-        if self.hparams.VAE_class == 'vqvae':
+        if self.hparams.visual_model_cls == 'vqvae':
             pov_logits, pov_sample, target = self(pov, vec, actions)
 
-            pred_frames = self.VAE.decode_with_grad(einops.rearrange(pov_sample, 'b t c (h w) -> (b t) c h w', h=16, w=16))
+            pred_frames = self.visual_model.decode_with_grad(einops.rearrange(pov_sample, 'b t c (h w) -> (b t) c h w', h=16, w=16))
             target_frames = einops.rearrange(pov[:,1:], 'b t c h w -> (b t) c h w')
             loss = (pred_frames - target_frames).pow(2).mean() / (2 * 0.06327039811675479)
 
 
-        elif self.hparams.VAE_class == 'vae':
-            pov_mean, pov_sample, target = self(pov, vec, actions)
-        
-            target_mean = target['pov']
-
-            loss = (pov_mean - target_mean).pow(2).sum(dim=[2,3,4]).mean()
+        elif self.hparams.visual_model_cls == 'vae':
+            means, log_stds, mixing_coefficients, target = self(pov, vec, actions)
+            #print(f'{means.shape = }')
+            #print(f'{log_vars.shape = }')
+            #print(f'{mixing_coefficients.shape = }')
+            #print(f'{target.shape = }')
+            var = torch.exp(2 * log_stds)
+            
+            log_det = torch.sum(2 * log_stds, dim=-1)
+            max_det = torch.max(log_det, dim=-1)[0]
+            
+            log_det = log_det - max_det[...,None] / 2
+            
+            #print(f'{det.shape = }')
+            diff = (means - target[:,:,None]).pow(2)
+            #print(f'{diff.shape = }')
+            exp = torch.exp(-0.5 / (var * diff).sum(-1))
+            #print(f'{exp.shape = }')
+            # use logsumexp trick for numerical stability
+            loss = torch.log(torch.sum(mixing_coefficients / np.sqrt(2 * np.pi) * torch.exp(-0.5 * log_det) * exp, dim=-1))
+            loss = loss - max_det
+            loss = -loss.mean()
+            print(loss)
+            #loss = (pov_mean - target_mean).pow(2).sum(dim=[2,3,4]).mean()
         
         return loss
     
@@ -155,37 +144,32 @@ class MDN_RNN(pl.LightningModule):
         # save shape params
         B, T = pov.shape[:2]
         print(f'{pov.shape = }')
+
         # merge frames with batch for batch processing
         pov = einops.rearrange(pov, 'b t c h w -> (b t) c h w')
         
         # encode pov to latent
-        if self.hparams.VAE_class == 'vqvae':
-            pov_sample, ind, log_priors = self.VAE.encode_only(pov)
+        if self.hparams.visual_model_cls == 'vqvae':
+            sample, ind, log_priors = self.visual_model.encode_only(pov)
             print(f'{pov_sample.shape = }')
             ind = einops.rearrange(ind, '(b t) h w -> b t h w', b=B, t=T)
-            input_states = einops.rearrange(pov_sample, '(b t) c h w -> b t c h w', b=B, t=T)[:,:-1]
+            sample = einops.rearrange(sample, '(b t) c h w -> b t c h w', b=B, t=T)
             log_priors = einops.rearrange(einops.rearrange(log_priors, '(b t) c h w -> b t c h w', b=B, t=T)[:,:-1], 'b t c h w -> (b t h w) c')
-            print(f'{input_states.shape = }')
             target = {
                 'pov': ind[:,1:]
             }
             
-        elif self.hparams.VAE_class == 'vae':
-            # the std in the VAE latent is always very close to 1, 
-            # so sample doesn't give additional info over mean
-            _, mean, std = self.VAE.encode_only(pov) 
-            mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', b=B)
-            logstd = einops.rearrange(torch.log(std), '(b t) c h w -> b t c h w', b=B)
+        elif self.hparams.visual_model_cls == 'vae':
+            sample, mean, logstd = self.visual_model.encode_only(pov) 
+            logstd = einops.rearrange(logstd, '(b t) d -> b t d', b=B)
+            mean = einops.rearrange(mean, '(b t) d -> b t d', b=B)
+            sample = einops.rearrange(sample, '(b t) d -> b t d', b=B)
 
             target_mean = mean[:,1:]
             target_logstd = logstd[:,1:]
-            target = {
-                'pov_mean': target_mean,
-                'pov_std': target_logstd
-            }
-            raise NotImplementedError
-            # TODO: incorporate logstd in network
-            #input_states = torch.cat([mean[:,:-1], logstd[:,:-1]], dim)
+
+            # sample from distribution to get an estimate of KL later
+            target = target_mean + torch.exp(target_logstd) * torch.normal(torch.zeros_like(target_logstd), torch.ones_like(target_mean))
             
         # condition on previous sequence to prime the RNN
         if self.hparams.conditioning_len > 0:
@@ -208,12 +192,13 @@ class MDN_RNN(pl.LightningModule):
             '''
 
         # compute one-step predictions
-        if self.hparams.VAE_class == 'vqvae':
+        input_states = torch.cat([sample, vec], dim=2)[:,:-1]
+        if self.hparams.visual_model_cls == 'vqvae':
             pov_logits, pov_sample, hidden_seq = self.one_step_prediction(input_states, actions[:,:-1], last_hidden, log_priors)
             return pov_logits, pov_sample, target
         else:
-            pov_mean, pov_sample, hidden_seq = self.one_step_prediction(input_states, actions[:,:-1], last_hidden)
-            return pov_mean, pov_sample, target
+            means, log_stds, mixing_coefficients = self.one_step_prediction(input_states, actions[:,:-1], last_hidden)
+            return means, log_stds, mixing_coefficients, target
             
     def one_step_prediction(self, states, actions, h0=None, log_prior=None):
         '''
@@ -231,29 +216,19 @@ class MDN_RNN(pl.LightningModule):
             hidden_state_seq - hidden states of the RNN after each time step
         '''
         # save T for later
-        B, T, C, H, W = states.shape
-        print(f'{states.shape = }')
-        
-        # distill states with conv net
-        conv_out = einops.rearrange(self.conv_net(einops.rearrange(states, 'b t c h w -> (b t) c h w')), '(b t) c h w -> b t (c h w)', t=T)
-        print(f'{conv_out.shape = }')
-        print(f'{actions.shape = }')
+        B, T, D = states.shape
         
         # compute hidden states of gru
-        #print(f'{conv_out = }')
-        #print(f'{actions = }')
         if h0 is None:
-            #actions = torch.zeros_like(actions)
-            hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2))
+            hidden_states_seq, _ = self.gru(torch.cat([states, actions], dim=2))
         else:
-            hidden_states_seq, _ = self.gru(torch.cat([conv_out, actions], dim=2), h0)
-        print(f'{hidden_states_seq.shape = }')
+            hidden_states_seq, _ = self.gru(torch.cat([states, actions], dim=2), h0)
 
         # compute next state
-        pov_pred = self.mdn_network(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d 1 1'))
+        mdn_out = self.mdn_network(einops.rearrange(hidden_states_seq, 'b t d -> (b t) d'))
 
-
-        if self.hparams.VAE_class == 'vqvae':
+        if self.hparams.visual_model_cls == 'vqvae':
+            raise NotImplementedError
             pov_logits = einops.rearrange(pov_pred, 'bt embedding_dim h w -> (bt h w) embedding_dim') # embedding_dim or num_embeddings
             # skip connection / update priors over discrete embedding vectors
             if log_prior is not None:
@@ -261,26 +236,25 @@ class MDN_RNN(pl.LightningModule):
             
             # sample next state
             one_hot_ind = nn.functional.gumbel_softmax(pov_logits, dim=-1, tau=self.hparams.temp, hard=True)
-            state = self.VAE.quantizer.embed_one_hot(one_hot_ind)
+            state = self.visual_model.quantizer.embed_one_hot(one_hot_ind)
             state = einops.rearrange(state, '(b t latent_size) embed_dim -> b t embed_dim latent_size', latent_size=self.latent_size, t=T)
             pov_logits = einops.rearrange(pov_logits, '(b t latent_size) num_embeds -> b t num_embeds latent_size', t=T, latent_size=self.latent_size)
             print(f'{pov_logits.shape = }')
             return pov_logits, state, hidden_states_seq
         
-        elif self.hparams.VAE_class == 'vae':
+        elif self.hparams.visual_model_cls == 'vae':
             # mean == pov_pred
-            mean = pov_pred
-            
-            # rearrange
-            mean = einops.rearrange(mean, '(b t) c h w -> b t c h w', t=T)
-            
+            mixing_coefficients = torch.softmax(mdn_out[:,:self.hparams.num_components], dim=-1)
+            mixing_coefficients = einops.rearrange(mixing_coefficients, '(b t) K -> b t K',t=T, b=B)
+            means = torch.chunk(mdn_out[:,self.hparams.num_components:self.hparams.num_components*(1+self.latent_dim)], chunks=self.hparams.num_components, dim=1)
+            means = einops.rearrange(torch.stack(means, dim=1), '(b t) K d -> b t K d',t=T, b=B)
+            log_stds = torch.chunk(mdn_out[:,self.hparams.num_components*(1+self.latent_dim):self.hparams.num_components*(1+2*self.latent_dim)], chunks=self.hparams.num_components, dim=1)
+            log_stds = einops.rearrange(torch.stack(log_stds, dim=1), '(b t) K d -> b t K d',t=T, b=B)
+
             # skip connection for mean
             #mean = mean + states
 
-            # sample state
-            state = mean + torch.normal(torch.zeros_like(mean), torch.ones_like(mean))
-            
-            return mean, state, hidden_states_seq
+            return means, log_stds, mixing_coefficients
         
     @torch.no_grad()
     def predict_recursively(self, states, actions, horizon, log_priors):
@@ -323,7 +297,7 @@ class MDN_RNN(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # perform predictions and compute loss
-        loss= self._step(batch)
+        loss = self._step(batch)
         # score and log predictions
         self.log('Training/loss', loss, on_step=True)
         
@@ -341,7 +315,7 @@ class MDN_RNN(pl.LightningModule):
     
     def configure_optimizers(self):
         # set up optimizer
-        params = list(self.gru.parameters()) + list(self.mdn_network.parameters()) + list(self.conv_net.parameters())# + list(self.linear.parameters())
+        params = list(self.gru.parameters()) + list(self.mdn_network.parameters()) # + list(self.linear.parameters())
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs, weight_decay=0)
         # set up scheduler
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, self.hparams.scheduler_kwargs['lr_gamma'])

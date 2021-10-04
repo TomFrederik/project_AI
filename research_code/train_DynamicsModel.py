@@ -102,9 +102,9 @@ class PredictionCallback(pl.Callback):
 
 
 def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr, 
-                        val_perc, batch_size, num_data, epochs, 
+                        batch_size, num_data, epochs, 
                         lr_gamma, lr_decrease_freq, log_dir, lr_step_mode, 
-                        model_path, VAE_class, vae_version, num_components,
+                        VAE_class, vae_version, num_components,
                         val_check_interval, load_from_checkpoint, version,
                         profile, temp,
                         conditioning_len, curriculum_threshold, curriculum_start,
@@ -149,11 +149,10 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
         model_kwargs = {
             'gru_kwargs':gru_kwargs, 
             'seq_len':seq_len, 
-            'VAE_path':model_path,
+            'visual_model_path':vae_path,
             'optim_kwargs':optim_kwargs,
             'scheduler_kwargs':scheduler_kwargs,
-            'VAE_class':VAE_class,
-            'VAE_path':vae_path,
+            'visual_model_cls':VAE_class,
             'num_components':num_components,
             'temp':temp,
             'conditioning_len':conditioning_len,
@@ -201,7 +200,6 @@ def train_DynamicsModel(env_name, data_dir, dynamics_model, seq_len, lr,
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('--model_path', help='Path to encoding model')
     parser.add_argument('--data_dir', default="/home/lieberummaas/datadisk/minerl/data")
     parser.add_argument('--log_dir', default="/home/lieberummaas/datadisk/minerl/run_logs")
     parser.add_argument('--env_name', default='MineRLTreechopVectorObf-v0')
@@ -215,7 +213,6 @@ if __name__=='__main__':
     parser.add_argument('--lr_gamma', default=1, type=float, help='Learning rate adjustment factor')
     parser.add_argument('--lr_step_mode', default='epoch', choices=['epoch', 'step'], type=str, help='Learning rate adjustment interval')
     parser.add_argument('--lr_decrease_freq', default=1, type=int, help='Learning rate adjustment frequency')
-    parser.add_argument('--val_perc', default=0.1, type=float, help='How much of the data should be used for validation')
     parser.add_argument('--VAE_class', type=str, default='vae', choices=['vae', 'vqvae'])
     parser.add_argument('--vae_version', type=int, default=0)
     parser.add_argument('--num_components', type=int, default=5, help='Number of mixture components. Only used in MDN-RNN')

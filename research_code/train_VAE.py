@@ -28,13 +28,13 @@ class RampBeta(pl.Callback):
         # "We divide the overall loss by 256 × 256 × 3, so that the weight of the KL term
         # becomes β/192, where β is the KL weight."
         # TODO: OpenAI uses 6.6/192 but kinda tricky to do the conversion here... about 5e-4 works for this repo so far... :\
-        t = cos_anneal(0, 5000, 0.0, 5e-4, trainer.global_step)
+        t = cos_anneal(0, 10000, 0.0, 5e-4, trainer.global_step)
         pl_module.beta = t
 
 class DecayLR(pl.Callback):
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
         # The step size is annealed from 1e10−4 to 1.25e10−6 over 1,200,000 updates. I use 3e-4
-        t = cos_anneal(0, 1200000, 3e-4, 1.25e-6, trainer.global_step)
+        t = cos_anneal(0, 120000000, 3e-4, 1.25e-6, trainer.global_step)
         for g in pl_module.optimizer.param_groups:
             g['lr'] = t
 

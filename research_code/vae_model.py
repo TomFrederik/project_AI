@@ -51,18 +51,15 @@ class VAE(pl.LightningModule):
             x - input, for mineRL (B, C, H, W) batch of frames
         Returns:
             mean
-            std
+            log_std
             sample - tensor of shape (B, L), where L is the latent dimension
         '''
         b, *_ = x.shape
         mean, log_std = self.encoder(x-0.5)
-        h = int((mean.shape[0]//b) ** 0.5)
         
-        mean = einops.rearrange(mean, '(b h w) c -> b c h w', b=b, h=h, w=h)
-        log_std = einops.rearrange(log_std, '(b h w) c -> b c h w', b=b, h=h, w=h)
 
         sample = self.sample(mean, log_std)
-        return sample, mean, torch.exp(log_std)
+        return sample, mean, log_std
     
     def encode_with_grad(self, x):
         b, *_ = x.shape
@@ -165,12 +162,12 @@ class VAEEncoder(nn.Module):
 
     def forward(self, x):
         #out = self.net(x)
-        print('\nEncoder:')
+        #print('\nEncoder:')
         out = x
         for m in self.net:
-            print(out.shape)
+        #    print(out.shape)
             out = m(out)
-        print(out.shape)
+        #print(out.shape)
         mean, log_std = torch.chunk(out, chunks=2, dim=-1)        
         return mean, log_std
 
@@ -180,15 +177,13 @@ class VAEDecoder(nn.Module):
     def __init__(self, latent_dim=64, n_init=64, n_hid=64, output_channels=3):
         super().__init__()
 
-        '''
+        
         self.net = nn.Sequential(
-            #nn.Linear(latent_dim, 16*n_init),
             Rearrange('b (h w c) -> b c h w', w=4, h=4),
-            #nn.ReLU(),
-            nn.Conv2d(latent_dim, n_init, 3, padding=1),
+            nn.Conv2d(64, n_init, 3, padding=1),
             nn.UpsamplingNearest2d((8,8)),
             nn.ReLU(),
-            nn.Conv2d(n_init, n_init, 3, 1),
+            nn.Conv2d(n_init, n_init, 3, padding=1),
             nn.UpsamplingNearest2d((16,16)),
             nn.ReLU(),
             nn.Conv2d(n_init, 2*n_hid, 3, padding=1),
@@ -214,13 +209,14 @@ class VAEDecoder(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(64, 3, 4, 2, 1),
         )
+        '''
 
     def forward(self, x):
-        print('\nDecoder:')
+        #print('\nDecoder:')
         out = x
         for m in self.net:
-            print(out.shape)
+        #    print(out.shape)
             out = m(out)
-        print(out.shape)
+        #print(out.shape)
         return out
         #return self.net(x)
