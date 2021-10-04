@@ -160,7 +160,7 @@ if __name__=='__main__':
     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
     parser.add_argument('--env_name', default='MineRLNavigateDenseVectorObf-v0')
     parser.add_argument('--batch_size', default=20, type=int)
-    parser.add_argument('--latent_dim', default=32, type=int)
+    parser.add_argument('--latent_dim', default=1024, type=int)
     parser.add_argument('--n_hid', default=64, type=int)
     parser.add_argument('--n_init', default=64, type=int)
     parser.add_argument('--epochs', default=1, type=int)

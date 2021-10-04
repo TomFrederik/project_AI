@@ -159,8 +159,8 @@ class VAEEncoder(nn.Module):
             nn.ReLU(),
             nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1), # (.... 4, 4)
             nn.ReLU(),
-            Rearrange('b c h w -> (b h w) c'),
-            nn.Linear(2*n_hid, 2*latent_dim)
+            Rearrange('b c h w -> b (c h w)'),
+            nn.Linear(2*n_hid*16, 2*latent_dim)
         )
 
     def forward(self, x):
@@ -180,12 +180,14 @@ class VAEDecoder(nn.Module):
     def __init__(self, latent_dim=64, n_init=64, n_hid=64, output_channels=3):
         super().__init__()
 
+        '''
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, n_init),
-            Rearrange('(b h w) c -> b c h w', w=4, h=4),
-            nn.ReLU(),
-            nn.Conv2d(n_init, n_init, 3, padding=1),
+            #nn.Linear(latent_dim, 16*n_init),
+            Rearrange('b (h w c) -> b c h w', w=4, h=4),
+            #nn.ReLU(),
+            nn.Conv2d(latent_dim, n_init, 3, padding=1),
             nn.UpsamplingNearest2d((8,8)),
+            nn.ReLU(),
             nn.Conv2d(n_init, n_init, 3, 1),
             nn.UpsamplingNearest2d((16,16)),
             nn.ReLU(),
@@ -196,6 +198,21 @@ class VAEDecoder(nn.Module):
             nn.ConvTranspose2d(2*n_hid, n_hid, 4, stride=2, padding=1),
             nn.ReLU(inplace=True),
             nn.ConvTranspose2d(n_hid, output_channels, 4, stride=2, padding=1),
+        )
+        '''
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, 256*4),
+            nn.ReLU(),
+            Rearrange('b (c h w) -> b c h w', h=2, w=2),
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 64, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 64, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, 4, 2, 1),
         )
 
     def forward(self, x):
