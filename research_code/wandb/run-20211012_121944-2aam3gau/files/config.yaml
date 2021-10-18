@@ -1,0 +1,109 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.12.4
+    code_path: code/research_code/DQfD_pretrain.py
+    framework: lightning
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    m:
+    - 1: trainer/global_step
+      6:
+      - 3
+    - 1: Training/1-step TD Error
+      5: 1
+      6:
+      - 1
+    - 1: Training/ClassificationLoss
+      5: 1
+      6:
+      - 1
+    - 1: Training/n-step TD Error
+      5: 1
+      6:
+      - 1
+    - 1: Training/Loss
+      5: 1
+      6:
+      - 1
+    - 1: Training/ExpertAgentAgreement
+      5: 1
+      6:
+      - 1
+    - 1: Training/ExpertQValues
+      5: 1
+      6:
+      - 1
+    - 1: Training/OtherQValues
+      5: 1
+      6:
+      - 1
+    - 1: Training/Actions._type
+      5: 1
+      6:
+      - 1
+    - 1: Training/Actions.values
+      5: 1
+      6:
+      - 1
+    - 1: Training/Actions.bins
+      5: 1
+      6:
+      - 1
+    python_version: 3.9.6
+    start_time: 1634041184
+    t:
+      1:
+      - 1
+      - 9
+      3:
+      - 15
+      - 16
+      4: 3.9.6
+      5: 0.12.4
+      8:
+      - 5
+discount_factor:
+  desc: null
+  value: 0.99
+dynamics_model_cls:
+  desc: null
+  value: None
+dynamics_model_path:
+  desc: null
+  value: None
+env_name:
+  desc: null
+  value: MineRLNavigateDenseVectorObf-v0
+freeze_dynamics_model:
+  desc: null
+  value: true
+freeze_visual_model:
+  desc: null
+  value: true
+horizon:
+  desc: null
+  value: 10
+margin:
+  desc: null
+  value: 0.8
+n_actions:
+  desc: null
+  value: 150
+optim_kwargs/lr:
+  desc: null
+  value: 0.03
+optim_kwargs/weight_decay:
+  desc: null
+  value: 1.0e-05
+target_update_rate:
+  desc: null
+  value: 10
+visual_model_cls:
+  desc: null
+  value: VAE
+visual_model_path:
+  desc: null
+  value: /home/lieberummaas/datadisk/minerl/experiment_logs/VisualModel/1he1xe7g/checkpoints/last.ckpt

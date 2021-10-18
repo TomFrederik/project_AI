@@ -1,0 +1,39 @@
+{
+    "os": "Linux-5.8.0-1041-azure-x86_64-with-glibc2.31",
+    "python": "3.9.6",
+    "heartbeatAt": "2021-10-12T15:30:05.730129",
+    "startedAt": "2021-10-12T15:30:04.761845",
+    "docker": null,
+    "gpu": "Tesla K80",
+    "gpu_count": 1,
+    "cpu_count": 6,
+    "cuda": null,
+    "args": [
+        "--log_dir",
+        "/home/lieberummaas/datadisk/minerl/experiment_logs/DQfD_pretraining",
+        "--visual_model_cls",
+        "vae",
+        "--visual_model_path",
+        "/home/lieberummaas/datadisk/minerl/experiment_logs/VisualModel/1he1xe7g/checkpoints/last.ckpt",
+        "--freeze_visual_model",
+        "--freeze_dynamics_model",
+        "--target_update_rate",
+        "50",
+        "--num_expert_episodes",
+        "3",
+        "--epochs",
+        "1000"
+    ],
+    "state": "running",
+    "program": "/home/lieberummaas/datadisk/minerl/research_code/DQfD_pretrain.py",
+    "codePath": "research_code/DQfD_pretrain.py",
+    "git": {
+        "remote": "git@github.com:TomFrederik/minerl.git",
+        "commit": "2e01dcedb190aff10d3e086f36fb7c3e659f1eeb"
+    },
+    "email": null,
+    "root": "/home/lieberummaas/datadisk/minerl",
+    "host": "minerlVM",
+    "username": "lieberummaas",
+    "executable": "/home/lieberummaas/datadisk/anaconda3/envs/minerl/bin/python"
+}

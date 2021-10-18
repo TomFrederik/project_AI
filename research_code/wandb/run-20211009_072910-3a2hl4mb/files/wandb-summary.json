@@ -1,0 +1,1 @@
+{"Training/Episode Reward": -42.28471374511719, "_runtime": 158, "_timestamp": 1633764708, "_step": 201, "Training/one_step_loss": 0.180200415655123, "Training/n_step_loss": 0.2707088318448821, "Training/classification_loss": 0.13738477230072021, "Training/ratio_expert_to_agent": 0.1599999964237213, "Training/Loss": 0.8205627880837788, "_wandb": {"runtime": 163}}

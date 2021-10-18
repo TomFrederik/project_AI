@@ -17,6 +17,6 @@ for feature_extractor_cls in vqvae conv vae
             PATH=""
         fi
         echo "Now training ${feature_extractor_cls}"
-        python PretrainDQN.py --log_dir $LOGDIR --feature_extractor_cls $feature_extractor_cls --num_workers 6 --train_feature_extractor --feature_extractor_path $PATH
+        python DQfD_pretrain.py --log_dir $LOGDIR --feature_extractor_cls $feature_extractor_cls --num_workers 6 --feature_extractor_path $PATH
     done
 ~         

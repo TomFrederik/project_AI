@@ -1,0 +1,44 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.12.4
+    code_path: code/research_code/DQfD_pretrain.py
+    framework: lightning
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    python_version: 3.9.6
+    start_time: 1634041002
+    t:
+      1:
+      - 1
+      - 9
+      3:
+      - 15
+      - 16
+      4: 3.9.6
+      5: 0.12.4
+      8:
+      - 5
+dynamics_model_cls:
+  desc: null
+  value: null
+dynamics_model_path:
+  desc: null
+  value: null
+env_name:
+  desc: null
+  value: MineRLNavigateDenseVectorObf-v0
+freeze_dynamics_model:
+  desc: null
+  value: true
+freeze_visual_model:
+  desc: null
+  value: true
+visual_model_cls:
+  desc: null
+  value: vae
+visual_model_path:
+  desc: null
+  value: /home/lieberummaas/datadisk/minerl/experiment_logs/VisualModel/1he1xe7g/checkpoints/last.ckpt

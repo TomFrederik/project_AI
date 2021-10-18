@@ -1,0 +1,111 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.12.4
+    code_path: code/research_code/vqvae.py
+    framework: lightning
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    m:
+    - 1: trainer/global_step
+      6:
+      - 3
+    - 1: Training/loss
+      5: 1
+      6:
+      - 1
+    - 1: Training/recon_loss
+      5: 1
+      6:
+      - 1
+    - 1: Training/latent_loss
+      5: 1
+      6:
+      - 1
+    - 1: epoch
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction._type
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction.path
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction.sha256
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction.size
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction.format
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction.width
+      5: 1
+      6:
+      - 1
+    - 1: Reconstruction.height
+      5: 1
+      6:
+      - 1
+    python_version: 3.9.6
+    start_time: 1634545112
+    t:
+      1:
+      - 1
+      - 9
+      2:
+      - 1
+      - 9
+      3:
+      - 7
+      - 15
+      - 16
+      4: 3.9.6
+      5: 0.12.4
+      8:
+      - 5
+architecture:
+  desc: null
+  value: VQVAE
+args/embedding_dim:
+  desc: null
+  value: 32
+args/n_hid:
+  desc: null
+  value: 64
+args/num_embeddings:
+  desc: null
+  value: 16
+args/num_variables:
+  desc: null
+  value: 32
+codebook_size:
+  desc: null
+  value: 16
+embedding_dim:
+  desc: null
+  value: 32
+env_name:
+  desc: null
+  value: MineRLNavigateDenseVectorObf-v0
+input_channels:
+  desc: null
+  value: 3
+log_perplexity:
+  desc: null
+  value: false
+num_variables:
+  desc: null
+  value: 32
+perplexity_freq:
+  desc: null
+  value: 500

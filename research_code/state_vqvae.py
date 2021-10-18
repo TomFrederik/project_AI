@@ -8,7 +8,6 @@ import einops
 import json
 
 from vqvae import VQVAE
-from vqvae_model.deepmind_enc_dec import DeepMindDecoder, DeepMindEncoder
 from action_vqvae import ActionVQVAE
 from vecobs_vqvae import VecObsVQVAE
 from scipy.cluster.vq import kmeans2
@@ -32,7 +31,8 @@ class StateVQVAE(pl.LightningModule):
         discard_priors=False,
         perplexity_freq=1, 
         log_perplexity=True,
-        max_seq_len=100
+        max_seq_len=100,
+        use_frame_one_hot=True
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -64,25 +64,35 @@ class StateVQVAE(pl.LightningModule):
         print(f'\n{lstm_enc_input_size = }')
         print(f'{self.vecobs_dim = }')
         print(f'{self.action_dim = }\n')
+
+        ## check if a valid lstm_enc_input_size was given
         if lstm_enc_input_size <= self.vecobs_dim + self.action_dim:
             raise ValueError(f"lstm_enc_input_size <= self.vecobs_dim + self.action_dim: {lstm_enc_input_size} <= {self.vecobs_dim} + {self.action_dim}")
         elif lstm_enc_input_size <= + self.action_dim:
             raise ValueError(f"lstm_enc_input_size <= self.action_dim: {lstm_enc_input_size} <= {self.action_dim}")
 
-        num_input_channels = self.vqvae.hparams.args.embedding_dim        
-        print(f'{num_input_channels = }')
-        self.cnn_encoder = DeepMindEncoder(num_input_channels, n_hid=64)
-        dummy = torch.zeros((2,num_input_channels,16,16), device=self.device)
-        self.cnn_encoded = self.cnn_encoder(dummy)
-        cnn_encoded_flat_dim = self.cnn_encoded.shape[1]*self.cnn_encoded.shape[2]*self.cnn_encoded.shape[3]
+        ## compute latent dimension of frame level vqvae
+        if use_frame_one_hot:
+            self.frame_latent_dim = self.vqvae.hparams.args.num_variables * self.vqvae.hparams.args.codebook_size
+        else:
+            raise NotImplementedError()
+            self.frame_latent_dim = self.vqvae.hparams.args.num_variables * self.vqvae.hparams.args.embedding_dim
 
-        self.first_projection = nn.Linear(cnn_encoded_flat_dim, lstm_enc_input_size-self.vecobs_dim-self.action_dim)
-        print(f'First: {cnn_encoded_flat_dim} -> {lstm_enc_input_size-self.vecobs_dim-self.action_dim}')
-        self.lstm_starting_state_projection = nn.Linear(lstm_enc_input_size-self.action_dim, lstm_enc_hidden_size)
-        print(f'lstm starting proj: {lstm_enc_input_size-self.vecobs_dim-self.action_dim} -> {lstm_enc_hidden_size}')
+        ### some useful projections
+        self.proj_frame_to_lstm = nn.Linear(self.frame_latent_dim, lstm_enc_input_size-self.vecobs_dim-self.action_dim)
+        self.proj_lstm_h0 = nn.Linear(lstm_enc_input_size-self.action_dim, lstm_enc_hidden_size)
+        self.proj_lstm_hidden_to_state_quantizer = nn.Linear(lstm_enc_hidden_size, self.quantizer_dim*latent_size)
+        self.proj_lstm_to_frame = nn.Linear(lstm_dec_hidden_size, self.frame_latent_dim + self.vecobs_dim)
+        print(f'proj_frame_to_lstm: {self.frame_latent_dim} -> {lstm_enc_input_size-self.vecobs_dim-self.action_dim}')
+        print(f'proj_lstm_h0: {lstm_enc_input_size-self.vecobs_dim-self.action_dim} -> {lstm_enc_hidden_size}')
+        print(f'proj_lstm_hidden_to_state_quantizer: {lstm_enc_hidden_size} -> {self.quantizer_dim*latent_size}')
+        print(f'proj_lstm_to_frame: {lstm_dec_hidden_size} -> {cnn_encoded_flat_dim}\n')
 
+        ## lstm encoder and decoder
         self.lstm_encoder = LSTMEncoder(input_size=self.hparams.lstm_enc_input_size, hidden_size=self.hparams.lstm_enc_hidden_size)
+        self.lstm_decoder = LSTMDecoder(input_size=embedding_dim*latent_size + cnn_encoded_flat_dim + self.vecobs_dim + self.action_dim, hidden_size=lstm_dec_hidden_size)
         
+        ## state quantizer
         if gumbel:
             self.quantizer = StateGumbelQuantizer(codebook_size=codebook_size, embedding_dim=embedding_dim)#, straight_through=True)
             self.quantizer_dim = codebook_size
@@ -90,27 +100,16 @@ class StateVQVAE(pl.LightningModule):
             self.quantizer = StateQuantizer(codebook_size=codebook_size, embedding_dim=embedding_dim)
             self.quantizer_dim = embedding_dim
         
-        self.second_projection = nn.Linear(lstm_enc_hidden_size, self.quantizer_dim*latent_size)
-        print(f'Second: {lstm_enc_hidden_size} -> {self.quantizer_dim*latent_size}')
-        
-        self.lstm_decoder = LSTMDecoder(input_size=embedding_dim*latent_size + cnn_encoded_flat_dim + self.vecobs_dim + self.action_dim, hidden_size=lstm_dec_hidden_size)
-
-        self.third_projection = nn.Linear(lstm_dec_hidden_size, cnn_encoded_flat_dim)
-        print(f'Third: {lstm_dec_hidden_size} -> {cnn_encoded_flat_dim}\n')
-
-        self.cnn_decoder = DeepMindDecoder(n_init=self.cnn_encoded.shape[1], n_hid=64, output_channels=self.vqvae.hparams.args.num_embeddings)#num_input_channels)
-        
-        self.model_list = [
-            self.cnn_encoder, 
-            self.cnn_decoder, 
-            self.first_projection, 
-            self.lstm_starting_state_projection, 
-            self.second_projection, 
-            self.third_projection, 
+        ## misc
+        self.model_list = nn.ModuleList([
+            self.proj_frame_to_lstm, 
+            self.proj_lstm_h0, 
+            self.proj_lstm_hidden_to_state_quantizer, 
+            self.proj_lstm_to_frame, 
             self.lstm_encoder, 
             self.lstm_decoder, 
             self.quantizer
-        ]
+        ])
 
         self.loss_fn = nn.CrossEntropyLoss()
     
@@ -124,26 +123,10 @@ class StateVQVAE(pl.LightningModule):
         return perplexity, cluster_use
 
     def _apply_frame_encoding(self, pov_obs):
-        # encode pov obs
-        t = pov_obs.shape[1]
-        pov_obs = einops.rearrange(pov_obs, 'b t c h w -> (b t) c h w')
-        
-        enc_pov_obs = torch.zeros(pov_obs.shape[0], self.vqvae.quantizer.embedding_dim, 16, 16).to(self.device)
-        frame_quantization_idcs = []
-        all_neg_dist = torch.zeros(pov_obs.shape[0], self.vqvae.quantizer.n_embed, 16, 16).to(self.device)
-        
-        for i in range((len(pov_obs)-1) // self.encoding_batch_size + 1):
-            enc_pov_obs[i * self.encoding_batch_size:(i+1) * self.encoding_batch_size], ind, all_neg_dist[i * self.encoding_batch_size:(i+1) * self.encoding_batch_size] = self.vqvae.encode_only(pov_obs[i * self.encoding_batch_size:(i+1) * self.encoding_batch_size])
-            #enc_pov_obs.append(z_q)
-            frame_quantization_idcs.append(ind)
-            #all_neg_dist.append(neg_dist)
-        
-        #pov_obs = torch.cat(enc_pov_obs, dim=0)
-        enc_pov_obs = einops.rearrange(enc_pov_obs, '(b t) c h w -> b t c h w', t=t)
-        frame_quantization_idcs = torch.cat(frame_quantization_idcs, dim=0)
-        all_neg_dist = einops.rearrange(all_neg_dist, '(b t) c h w -> b t c h w', t=t)[:,:-1]
-        
-        return enc_pov_obs, frame_quantization_idcs, all_neg_dist
+        one_hot, probs = self.vqvae.encode_only_one_hot(einops.rearrange(pov_obs, 'b t c h w -> (b t) c h w'))
+        one_hot = einops.rearrange(one_hot, '(b t) c d -> b t c d')
+        probs = einops.rearrange(probs, '(b t) c -> b t c')
+        return one_hot, probs
 
     def _compute_log_prior(self, neg_dist):
         B, T, C, H, W = neg_dist.shape
@@ -161,7 +144,7 @@ class StateVQVAE(pl.LightningModule):
         enc_hidden_state_seq, (enc_last_hidden, enc_last_cell) = self.lstm_encoder(enc_lstm_input, enc_first_hidden, enc_first_cell)
 
         # prepare quantizer input
-        quantizer_input = self.second_projection(einops.rearrange(enc_hidden_state_seq, 'b t d -> (b t) d'))
+        quantizer_input = self.proj_lstm_hidden_to_state_quantizer(einops.rearrange(enc_hidden_state_seq, 'b t d -> (b t) d'))
         quantizer_input = einops.rearrange(quantizer_input, 'bt (latent_size quantizer_dim) -> bt latent_size quantizer_dim', latent_size=self.hparams.latent_size, quantizer_dim=self.quantizer_dim)
         
         # quantize
@@ -179,17 +162,10 @@ class StateVQVAE(pl.LightningModule):
         # decode with lstm
         dec_hidden_state_seq, (dec_last_hidden, dec_last_cell) = self.lstm_decoder(dec_lstm_input, dec_first_hidden, dec_first_cell)
 
+        predictions = dec_hidden_state_seq
         # prepare cnn decoder input
-        cnn_decoder_input = self.third_projection(einops.rearrange(dec_hidden_state_seq, 'b t d -> (b t) d'))
-        cnn_decoder_input = einops.rearrange(cnn_decoder_input, 'bt (c h w) -> bt c h w', c=self.cnn_encoded.shape[1], h=self.cnn_encoded.shape[2], w=self.cnn_encoded.shape[3])
+        predictions = einops.rearrange(self.proj_lstm_to_frame(einops.rearrange(dec_hidden_state_seq, 'b t d -> (b t) d')), '(b t) d -> b t d', t=T)
 
-        # decode with cnn decoder
-        # decode in batches because otherwise out of memory
-        predictions = []
-        for i in range((len(cnn_decoder_input) - 1) // self.encoding_batch_size + 1):
-            predictions.append(self.cnn_decoder(cnn_decoder_input[i*self.encoding_batch_size:(i+1)*self.encoding_batch_size]))
-        predictions = einops.rearrange(torch.cat(predictions, dim=0), '(b t) c h w -> b t c h w', t=T)
-        
         return predictions, latent_loss, ind, (enc_last_hidden, enc_last_cell), (dec_last_hidden, dec_last_cell)
     
     ''' #TODO
@@ -226,9 +202,9 @@ class StateVQVAE(pl.LightningModule):
 
         # prepare lstm input
         dec_lstm_input = torch.cat([einops.rearrange(encoded_images, '(b t) d -> b t d', t=T)[:,:-1], vec_obs[:,:-1], actions[:,:-1]], dim=2)
-        encoded_images = self.first_projection(encoded_images)
+        encoded_images = self.proj_frame_to_lstm(encoded_images)
         encoded_images = einops.rearrange(encoded_images, '(b t) d -> b t d', b=B, t=T)
-        enc_first_hidden = self.lstm_starting_state_projection(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
+        enc_first_hidden = self.proj_lstm_h0(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
         #print(f'post lstm starting proj: {enc_first_hidden.shape}')
         enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2)
 
@@ -302,11 +278,11 @@ class StateVQVAE(pl.LightningModule):
             max_seq_len = self.hparams.max_seq_len
         
         # apply frame vqvae
-        pov_obs, frame_quantization_idcs, neg_dist = self._apply_frame_encoding(pov_obs)
-        assert pov_obs.shape[-2:] == torch.Size([16,16]), f"Expected pov_obs.shape to end with (16,16) but got {pov_obs.shape}"
+        frame_one_hot, probs = self._apply_frame_encoding(pov_obs)
+        # pov_obs, frame_quantization_idcs, neg_dist = self._apply_frame_encoding(pov_obs)
                 
-        B, T, C, H, W = pov_obs.shape
-        #print('B, T, C, H, W = ', B, T, C, H, W)
+        B, T, C, D = frame_one_hot.shape
+        print('B, T, C, D = ', B, T, C, D)
 
         if self.action_quantizer is not None:
             # apply action vqvae
@@ -317,21 +293,19 @@ class StateVQVAE(pl.LightningModule):
             vec_obs = einops.rearrange(self.vecobs_quantizer.encode_only(einops.rearrange(vec_obs, 'b t d -> (b t) d'))[0], '(b t) d -> b t d', b=B)
 
         # encode all images
-        encoded_images = einops.rearrange(self.cnn_encoder(einops.rearrange(pov_obs, 'b t c h w -> (b t) c h w')), 'bt c h w -> bt (c h w)')
+        encoded_images = einops.rearrange(frame_one_hot, 'b t c d -> b t (c d)')
         # encoded_imgs.shape = [B, T, 1024]
-        # vec_obs.shape = [B, T, 64] # <- float vector
+        # vec_obs.shape = [B, T, 64] 
         # actions.shape = [B, T, 64]
         # dec_lstm_input = [B, T, 1152]
-        dec_lstm_input = torch.cat([einops.rearrange(encoded_images, '(b t) d -> b t d', t=T)[:,:-1], vec_obs[:,:-1], actions[:,:-1]], dim=2)
-        encoded_images = self.first_projection(encoded_images)
-        encoded_images = einops.rearrange(encoded_images, '(b t) d -> b t d', b=B, t=T)
+        dec_lstm_input = torch.cat([encoded_images[:,:-1], vec_obs[:,:-1], actions[:,:-1]], dim=2)
+        
+        encoded_images = self.proj_frame_to_lstm(einops.rearrange(encoded_images, 'b t cd -> (b t) cd'))
+        enc_first_hidden = self.proj_lstm_h0(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
+        enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2)
         #print(f'{encoded_images.shape = }')
 
         # create lstm input
-        #print(f'pre lstm starting proj: {torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1).shape}')
-        enc_first_hidden = self.lstm_starting_state_projection(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
-        #print(f'post lstm starting proj: {enc_first_hidden.shape}')
-        enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2)
         if max_seq_len < pov_obs.shape[1]-1:
             # split into max_seq_len sized subsequences
             
@@ -397,36 +371,35 @@ class StateVQVAE(pl.LightningModule):
         # predictions.shape = [B, T-1, 32, 16, 16]
         # compute log_priors and update
         if not self.hparams.discard_priors:
-            log_prior = self._compute_log_prior(neg_dist)
-            for i in range(len(all_predictions)):
-                all_predictions[i] += log_prior[:,i*self.hparams.max_seq_len:(i+1)*self.hparams.max_seq_len] 
+            print('\n\nWARNING: priors currently disabled!\n\n')
+            # log_prior = self._compute_log_prior(neg_dist)
+            # for i in range(len(all_predictions)):
+            #     all_predictions[i] += log_prior[:,i*self.hparams.max_seq_len:(i+1)*self.hparams.max_seq_len] 
         else:
             pass
 
         #return predictions, pov_obs[:,1:], latent_loss
-        return all_predictions, frame_quantization_idcs[1:], latent_loss, all_ind
+        return all_predictions, probs[:,1:], latent_loss, all_ind
         
     def training_step(self, batch, batch_idx):
         # unpack batch
         pov_obs, vec_obs, actions = batch
         
         # make predictions
-        predictions, targets, latent_loss, ind = self(pov_obs, vec_obs, actions)
+        predictions, target_probs, latent_loss, ind = self(pov_obs, vec_obs, actions)
         
+        pov_predictions, vec_obs_predictions = predictions[...,:-64], predictions[...,-64:]
+
         # compute loss
-        reconstruction_loss = 0
-        for i in range(len(predictions)):
-            preds = predictions[i][0]
-            targs = targets[i*self.hparams.max_seq_len:(i+1)*self.hparams.max_seq_len]
-            #print(f"{preds.shape = }")
-            #print(f"{targs.shape = }")
-            reconstruction_loss = reconstruction_loss + self.loss_fn(preds, targs)
-        loss = reconstruction_loss + latent_loss
+        # pov_loss = NLL, averaged over batch and time
+        pov_loss = (target_probs * torch.log(pov_predictions)).sum() / (target_probs.shape[0] * target_probs.shape[1])
+        vec_loss = 0 #TODO
+        loss = pov_loss + latent_loss + vec_loss
         #print(f'attempting backward with sequence of length {pov_obs.shape[1]}...')
 
         # logging
         self.log('Training/loss', loss, on_step=True)
-        self.log('Training/reconstruction_loss', reconstruction_loss, on_step=True)
+        self.log('Training/pov_loss', pov_loss, on_step=True)
         self.log('Training/latent_loss', latent_loss, on_step=True)
         if self.hparams.log_perplexity:
             if (self.global_step + 1) % self.hparams.perplexity_freq == 0:
@@ -474,12 +447,12 @@ class StateVQVAE(pl.LightningModule):
         print(f'{vec_obs.shape = }')
         print(f'{actions.shape = }')
         dec_lstm_input = torch.cat([einops.rearrange(encoded_images, '(b t) d -> b t d', t=T), vec_obs, actions[:,:-1]], dim=2)
-        encoded_images = self.first_projection(encoded_images)
+        encoded_images = self.proj_frame_to_lstm(encoded_images)
         encoded_images = einops.rearrange(encoded_images, '(b t) d -> b t d', b=B, t=T)
 
         # create lstm input
         #print(f'pre lstm starting proj: {torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1).shape}')
-        enc_first_hidden = self.lstm_starting_state_projection(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
+        enc_first_hidden = self.proj_lstm_h0(torch.cat([encoded_images[:,0], vec_obs[:,0]], dim=1))[:,None]
         #print(f'post lstm starting proj: {enc_first_hidden.shape}')
         enc_lstm_input = torch.cat([encoded_images[:,1:], vec_obs[:,1:], actions[:,:-1]], dim=2)
         
@@ -507,11 +480,9 @@ class StateVQVAE(pl.LightningModule):
         all_predictions, frame_quantization_idcs[1:], latent_loss, all_ind
 
     def configure_optimizers(self):
-        params = []
-        for m in self.model_list:
-            params += list(m.parameters())
-        self.optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
-        return self.optimizer
+        params = list(model_list.parameters())
+        optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs)
+        return optimizer
 
 class LSTMEncoder(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -588,28 +559,13 @@ class StateQuantizer(nn.Module):
         z_q = self.embed_code(ind)
         
         # compute embedding loss
-        #print(f'{self.embedding.weight.grad = }')
-        #print(f'{(z_q-z_e).pow(2).mean() = }')
-        #latent_loss = self.commitment_cost * (z_q - z_e).pow(2).mean()
         latent_loss = self.commitment_cost * (z_q.detach() - z_e).pow(2).mean() + (z_q - z_e.detach()).pow(2).mean()
         latent_loss *= self.kld_scale
-        #print(latent_loss)
-        #latent_loss.backward()
-        #print(f'{self.embedding.weight.grad[self.embedding.weight.grad != 0] = }')
-        #print(f'{z_q.grad = }')
-        #print(f'{z_e.grad = }')
-        #out = self.embedding(torch.arange(self.codebook_size, dtype=torch.long, device=self.embedding.weight.device))
-        #loss = out.pow(2).mean()
-        #latent_loss.backward(retain_graph=True)
-        #print(f'{self.embedding.weight = }')
-        
-        #raise ValueError
-        
         
         # straight through gradient
         z_q = z_e + (z_q - z_e).detach()
         z_q = einops.rearrange(z_q, '(b n) d -> b n d', n=N)
-        #print(self.embedding.weight)
+
         return z_q, latent_loss
 
     def embed_code(self, embed_id):
@@ -649,12 +605,7 @@ class StateGumbelQuantizer(nn.Module):
         # force hard = True when we are in eval mode, as we must quantize
         hard = self.straight_through if self.training else True
         soft_one_hot = F.gumbel_softmax(z, tau=self.temperature, dim=2, hard=hard)
-        #print(f'{z.shape = }')
-        #print(f'{soft_one_hot.shape = }')
-        #print(f'{self.embedding.weight.shape = }')
         z_q = soft_one_hot @ self.embedding.weight
-        #z_q = einsum('b lat codebook, codebook embed -> b lat embed', soft_one_hot, self.embedding.weight)
-        #print(f'{z_q.shape = }')
 
         # + kl divergence to the prior loss
         qy = F.softmax(z, dim=2)

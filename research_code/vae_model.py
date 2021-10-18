@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import einops
 from einops.layers.torch import Rearrange
 
+
 class VAE(pl.LightningModule):
     '''
     A base class for VAEs
@@ -40,7 +41,9 @@ class VAE(pl.LightningModule):
 
         # sample latent vector
         z = self.sample(mean, log_std)
+        
         return torch.clamp(0.5 + self.decoder(z), 0, 1)
+        #return self.decoder(z)
 
     @torch.no_grad()
     def encode_only(self, x):
@@ -64,19 +67,16 @@ class VAE(pl.LightningModule):
     def encode_with_grad(self, x):
         b, *_ = x.shape
         mean, log_std = self.encoder(x-0.5)
-        h = int((mean.shape[0]//b) ** 0.5)
         
         # compute KL distance, i.e. regularization loss
         L_regul = (0.5 * (torch.exp(2 * log_std) + mean ** 2 - 1 - 2 * log_std)).sum(dim=-1).mean()
-
-        mean = einops.rearrange(mean, '(b h w) c -> b c h w', b=b, h=h, w=h)
-        log_std = einops.rearrange(log_std, '(b h w) c -> b c h w', b=b, h=h, w=h)
 
         sample = self.sample(mean, log_std)
         return sample, L_regul, None, None
 
     @torch.no_grad()
     def decode_only(self, z):
+        #return self.decoder(z)
         return torch.clamp(0.5 + self.decoder(z), 0, 1)
 
     def forward(self, x):
@@ -94,6 +94,7 @@ class VAE(pl.LightningModule):
         
         # decode
         x_hat = torch.clamp(self.decoder(z) + 0.5, 0, 1)
+        #x_hat = self.decoder(z)
         
         # compute reconstruction loss, sum over all dimension except batch
         L_reconstr = (x - x_hat).pow(2).mean() / (2* 0.06327039811675479) # cifar-10 data variance, from deepmind sonnet code)
@@ -109,13 +110,13 @@ class VAE(pl.LightningModule):
         obs, *_ = batch
         obs = obs['pov'].float() / 255
         obs = einops.rearrange(obs, 'b h w c -> b c h w')
-        L_rec, L_reg = self(obs)
+        recon_loss, latent_loss = self(obs)
 
-        loss = L_rec + self.beta * L_reg
+        loss = recon_loss + self.beta * latent_loss
 
         self.log('Training/loss', loss, on_step=True)
-        self.log('Training/recon_loss', L_rec, on_step=True)
-        self.log('Training/latent_loss', L_reg, on_step=True)
+        self.log('Training/recon_loss', recon_loss, on_step=True)
+        self.log('Training/latent_loss', latent_loss, on_step=True)
 
         return loss
 
@@ -143,6 +144,19 @@ class VAEEncoder(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
+            nn.Conv2d(3, 32, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, 4, 2),
+            nn.ReLU(),
+            Rearrange('b c h w -> b (c h w)'),
+            nn.Linear(1024, 2*latent_dim)
+        )
+        '''
+        self.net = nn.Sequential(
             nn.Conv2d(input_channels, n_hid, 4, stride=2, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(n_hid, 2*n_hid, 4, stride=2, padding=1),
@@ -158,7 +172,7 @@ class VAEEncoder(nn.Module):
             nn.ReLU(),
             Rearrange('b c h w -> b (c h w)'),
             nn.Linear(2*n_hid*16, 2*latent_dim)
-        )
+        )'''
 
     def forward(self, x):
         #out = self.net(x)
@@ -177,7 +191,7 @@ class VAEDecoder(nn.Module):
     def __init__(self, latent_dim=64, n_init=64, n_hid=64, output_channels=3):
         super().__init__()
 
-        
+        '''
         self.net = nn.Sequential(
             Rearrange('b (h w c) -> b c h w', w=4, h=4),
             nn.Conv2d(64, n_init, 3, padding=1),
@@ -196,20 +210,18 @@ class VAEDecoder(nn.Module):
         )
         '''
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, 256*4),
+            nn.Linear(latent_dim, 1024),
+            Rearrange('b d -> b d 1 1'),
+            nn.ConvTranspose2d(1024, 128, 5, 2),
             nn.ReLU(),
-            Rearrange('b (c h w) -> b c h w', h=2, w=2),
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+            nn.ConvTranspose2d(128, 64, 5, 2),
             nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.ConvTranspose2d(64, 32, 6, 2),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 64, 4, 2, 1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 64, 4, 2, 1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 3, 4, 2, 1),
+            nn.ConvTranspose2d(32, 3, 6, 2),
+            #nn.Sigmoid(),
         )
-        '''
+        
 
     def forward(self, x):
         #print('\nDecoder:')

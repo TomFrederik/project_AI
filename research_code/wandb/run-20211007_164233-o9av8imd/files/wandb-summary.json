@@ -1,0 +1,1 @@
+{"Training/loss": 74.3040771484375, "Training/pov_loss": 73.15251159667969, "Training/vec_loss": 1.1515649557113647, "epoch": 0, "trainer/global_step": 98, "_runtime": 69, "_timestamp": 1633625022, "_step": 98, "_wandb": {"runtime": 71}}

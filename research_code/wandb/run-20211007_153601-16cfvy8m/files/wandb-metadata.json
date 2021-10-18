@@ -1,0 +1,31 @@
+{
+    "os": "Linux-5.8.0-1041-azure-x86_64-with-glibc2.31",
+    "python": "3.9.6",
+    "heartbeatAt": "2021-10-07T15:36:02.545631",
+    "startedAt": "2021-10-07T15:36:01.505953",
+    "docker": null,
+    "gpu": "Tesla K80",
+    "gpu_count": 1,
+    "cpu_count": 6,
+    "cuda": null,
+    "args": [
+        "--embedding_dim",
+        "32",
+        "--num_embeddings",
+        "32",
+        "--num_variables",
+        "128"
+    ],
+    "state": "running",
+    "program": "/home/lieberummaas/datadisk/minerl/research_code/vqvae.py",
+    "codePath": "research_code/vqvae.py",
+    "git": {
+        "remote": "git@github.com:TomFrederik/minerl.git",
+        "commit": "2e01dcedb190aff10d3e086f36fb7c3e659f1eeb"
+    },
+    "email": null,
+    "root": "/home/lieberummaas/datadisk/minerl",
+    "host": "minerlVM",
+    "username": "lieberummaas",
+    "executable": "/home/lieberummaas/datadisk/anaconda3/envs/minerl/bin/python"
+}

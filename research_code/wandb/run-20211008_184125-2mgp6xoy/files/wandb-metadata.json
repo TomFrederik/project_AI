@@ -1,0 +1,32 @@
+{
+    "os": "Linux-5.8.0-1041-azure-x86_64-with-glibc2.31",
+    "python": "3.9.6",
+    "heartbeatAt": "2021-10-08T18:41:27.049602",
+    "startedAt": "2021-10-08T18:41:25.942662",
+    "docker": null,
+    "gpu": "Tesla K80",
+    "gpu_count": 1,
+    "cpu_count": 6,
+    "cuda": null,
+    "args": [
+        "--use_whole_trajectories",
+        "--visual_model_cls",
+        "vqvae",
+        "--visual_model_path",
+        "/home/lieberummaas/datadisk/minerl/experiment_logs/VisualModel/2p1s1xsz/checkpoints/last.ckpt",
+        "--log_dir",
+        "/home/lieberummaas/datadisk/minerl/experiment_logs/DynamicsModel/"
+    ],
+    "state": "running",
+    "program": "/home/lieberummaas/datadisk/minerl/research_code/train_DynamicsModel.py",
+    "codePath": "research_code/train_DynamicsModel.py",
+    "git": {
+        "remote": "git@github.com:TomFrederik/minerl.git",
+        "commit": "2e01dcedb190aff10d3e086f36fb7c3e659f1eeb"
+    },
+    "email": null,
+    "root": "/home/lieberummaas/datadisk/minerl",
+    "host": "minerlVM",
+    "username": "lieberummaas",
+    "executable": "/home/lieberummaas/datadisk/anaconda3/envs/minerl/bin/python"
+}
