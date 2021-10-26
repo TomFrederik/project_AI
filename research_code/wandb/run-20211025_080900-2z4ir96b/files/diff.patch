@@ -1,0 +1,973 @@
+diff --git a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/0.mp4 b/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/0.mp4
+deleted file mode 100644
+index 99a1a2c..0000000
+Binary files a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/0.mp4 and /dev/null differ
+diff --git a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/1.mp4 b/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/1.mp4
+deleted file mode 100644
+index ea5534c..0000000
+Binary files a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/1.mp4 and /dev/null differ
+diff --git a/research_code/DQfD_models.py b/research_code/DQfD_models.py
+index e3f4d54..36c4f77 100644
+--- a/research_code/DQfD_models.py
++++ b/research_code/DQfD_models.py
+@@ -1,6 +1,7 @@
+ from copy import deepcopy
+ 
+ import einops
++from einops.layers.torch import Rearrange
+ import numpy as np
+ import pytorch_lightning as pl
+ import torch
+@@ -30,21 +31,24 @@ class ResBlock(nn.Module):
+         return out
+ 
+ class ConvFeatureExtractor(nn.Module):
+-    def __init__(self, n_hid=86, latent_dim=64):
++    def __init__(self, input_channels=3, n_hid=64, latent_dim=1024):
+         super().__init__()
+-        self.conv = nn.Sequential(
+-            nn.Conv2d(3, n_hid, 4, stride=2, padding=1),
+-            nn.ReLU(inplace=True),
+-            nn.Conv2d(n_hid, 2*n_hid, 4, stride=2, padding=1),
+-            nn.ReLU(inplace=True),
+-            nn.Conv2d(2*n_hid, 2*n_hid, 3, padding=1),
+-            nn.ReLU(inplace=True),
+-            ResBlock(2*n_hid, 2*n_hid//4),
+-            ResBlock(2*n_hid, 2*n_hid//4)
++
++        self.net = nn.Sequential(
++            nn.Conv2d(3, 32, 4, 2),
++            nn.ReLU(),
++            nn.Conv2d(32, 64, 4, 2),
++            nn.ReLU(),
++            nn.Conv2d(64, 128, 4, 2),
++            nn.ReLU(),
++            nn.Conv2d(128, 256, 4, 2),
++            nn.ReLU(),
++            Rearrange('b c h w -> b (c h w)'),
++            nn.Linear(1024, latent_dim)
+         )
+-        
++
+     def forward(self, x):
+-        return self.conv(x)
++        return self.net(x)
+     
+     @torch.no_grad()
+     def encode_only(self, x):
+@@ -55,7 +59,7 @@ class ConvFeatureExtractor(nn.Module):
+     
+     @property
+     def device(self):
+-        return list(self.conv.parameters())[0].device
++        return list(self.net.parameters())[0].device
+ 
+ class QNetwork(pl.LightningModule):
+     
+@@ -83,6 +87,7 @@ class QNetwork(pl.LightningModule):
+         if visual_model_cls in [VQVAE, VAE]:
+             self.visual_model = visual_model_cls.load_from_checkpoint(visual_model_path)
+             print(f'\nLoaded {visual_model_cls.__name__} from {visual_model_path}!')
++            self.visual_model.eval()
+         elif visual_model_cls == ConvFeatureExtractor:
+             self.visual_model = visual_model_cls(**visual_model_kwargs)
+             print('\nInitialized new ConvFeatureExtractor')
+@@ -201,9 +206,52 @@ class QNetwork(pl.LightningModule):
+     
+         n_step_rewards = F.conv1d(rewards[None,None,:], discount_array[None,None,:], padding=self.hparams.horizon)[0,0,:-1]
+         n_step_rewards = n_step_rewards[self.hparams.horizon:]
++
+         return n_step_rewards
+ 
+     def training_step(self, batch, batch_idx):
++        one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs = self.step(batch)
++
++        # logging
++        log_dict = {
++            'Training/1-step TD Error': one_step_loss,
++            'Training/ClassificationLoss': classification_loss,
++            'Training/n-step TD Error': n_step_loss,
++            'Training/Loss': loss,
++            'Training/ExpertAgentAgreement': expert_agent_agreement,
++            'Training/ExpertQValues': expert_q_values,
++            'Training/OtherQValues': other_q_values,
++            'Training/Actions': wandb.Histogram(action_idcs.detach().cpu())
++        }
++        self.logger.experiment.log(log_dict)
++
++        return loss
++
++    def validation_step(self, batch, batch_idx):
++        one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs = self.step(batch)
++
++        # logging
++        log_dict = {
++            'Validation/1-step TD Error': one_step_loss,
++            'Validation/ClassificationLoss': classification_loss,
++            'Validation/n-step TD Error': n_step_loss,
++            'Validation/Loss': loss,
++            'Validation/ExpertAgentAgreement': expert_agent_agreement,
++            'Validation/ExpertQValues': expert_q_values,
++            'Validation/OtherQValues': other_q_values,
++            #'Validation/Actions': wandb.Histogram(action_idcs.detach().cpu())
++        }
++        return log_dict
++
++    def validation_epoch_end(self, outputs):
++        log_dict = {}
++        for key in outputs[0].keys():
++            mean_metric = torch.stack([x[key] for x in outputs], dim=0).mean()
++            log_dict[key] = mean_metric
++        self.logger.experiment.log(log_dict)
++
++
++    def step(self, batch): 
+         pov_obs, vec_obs, actions, action_idcs, rewards = map(lambda x: x[0], batch) # remove first dimension
+         
+         # compute n-step rewards
+@@ -246,7 +294,6 @@ class QNetwork(pl.LightningModule):
+ 
+         # compute the individual losses
+         idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
+-        print(q_values[idcs, action_idcs])
+         classification_loss = self._large_margin_classification_loss(q_values, action_idcs).mean()
+         one_step_loss = (q_values[idcs, action_idcs] - rewards - self.hparams.discount_factor * torch.cat([target_next_q_values[idcs[:-1], next_action], torch.zeros_like(rewards)[:1]], dim=0)).pow(2).mean()
+         n_step_loss = (q_values[idcs, action_idcs] - n_step_rewards - (self.hparams.discount_factor ** self.hparams.horizon) * torch.cat([target_n_step_q_values[idcs[:-self.hparams.horizon], n_step_action], torch.zeros_like(n_step_rewards)[:self.hparams.horizon]],dim=0)).pow(2).mean()
+@@ -263,22 +310,10 @@ class QNetwork(pl.LightningModule):
+         other_q_values[idcs, action_idcs] = 0
+         other_q_values = other_q_values.mean()
+         ##
+-        
+-        # logging
+-        log_dict = {
+-            'Training/1-step TD Error': one_step_loss,
+-            'Training/ClassificationLoss': classification_loss,
+-            'Training/n-step TD Error': n_step_loss,
+-            'Training/Loss': loss,
+-            'Training/ExpertAgentAgreement': expert_agent_agreement,
+-            'Training/ExpertQValues': expert_q_values,
+-            'Training/OtherQValues': other_q_values,
+-            'Training/Actions': wandb.Histogram(action_idcs.detach().cpu())
+-        }
+-        self.logger.experiment.log(log_dict)
+ 
+-        return loss
+-    
++        return one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs.detach().cpu()
++
++
+     def on_after_backward(self):
+         if (self.global_step + 1) % self.hparams.target_update_rate == 0:
+             print(f'\nGlobal step {self.global_step+1}: Updating Target Network\n')
+diff --git a/research_code/DQfD_pretrain.py b/research_code/DQfD_pretrain.py
+index 233d95a..e830ff8 100644
+--- a/research_code/DQfD_pretrain.py
++++ b/research_code/DQfD_pretrain.py
+@@ -50,7 +50,7 @@ def main(
+     if batch_size > 1: 
+         raise NotImplementedError
+     
+-    if visual_model_cls == 'conv' and ~unfreeze_visual_model:
++    if visual_model_cls == 'conv' and not unfreeze_visual_model:
+         raise ValueError("Mustn't freeze_visual_model when using conv!")
+ 
+     # make sure that relevant dirs exist
+@@ -62,10 +62,10 @@ def main(
+         env_name=env_name,
+         visual_model_cls=visual_model_cls,
+         visual_model_path=visual_model_path,
+-        freeze_visual_model=~unfreeze_visual_model,
++        freeze_visual_model=not unfreeze_visual_model,
+         dynamics_model_cls=dynamics_model_cls,
+         dynamics_model_path=dynamics_model_path,
+-        freeze_dynamics_model=~unfreeze_dynamics_model,
++        freeze_dynamics_model=not unfreeze_dynamics_model,
+         use_one_hot=use_one_hot
+     )
+     if dynamics_model_cls is not None:
+@@ -104,7 +104,7 @@ def main(
+         'freeze_visual_model':~unfreeze_visual_model,
+         'dynamics_model_cls':dynamics_model_cls, 
+         'dynamics_model_path':dynamics_model_path, 
+-        'freeze_dynamics_model':~unfreeze_dynamics_model,
++        'freeze_dynamics_model':not unfreeze_dynamics_model,
+         'use_one_hot':use_one_hot
+     }
+     
+@@ -112,15 +112,17 @@ def main(
+     model = QNetwork(**model_kwargs)
+     
+     # load data
+-    train_data = datasets.TrajectoryIterData(env_name, data_dir, num_expert_episodes, centroids, num_workers=num_workers)
++    data = datasets.TrajectoryData(env_name, data_dir, num_expert_episodes, centroids)
++    train_data, val_data = torch.utils.data.random_split(data, [int(len(data)*0.9), len(data) - int(len(data)*0.9)])
+     train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
++    val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+     
+     # set up trainer
+     model_checkpoint = ModelCheckpoint(mode="min", monitor='Training/Loss', save_last=True, every_n_train_steps=500)
+     trainer=pl.Trainer(
+         logger=wandb_logger,
+         progress_bar_refresh_rate=1, #every N batches update progress bar
+-        log_every_n_steps=10,
++        log_every_n_steps=100,
+         callbacks=[model_checkpoint],
+         gpus=torch.cuda.device_count(),
+         default_root_dir=log_dir,
+@@ -129,7 +131,7 @@ def main(
+     )
+ 
+     # train
+-    trainer.fit(model, train_loader)
++    trainer.fit(model, train_loader, val_loader)
+ 
+ 
+ if __name__ == '__main__':
+@@ -138,10 +140,10 @@ if __name__ == '__main__':
+     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
+     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
+     parser.add_argument('--centroids_path', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
+-    parser.add_argument('--num_centroids', type=int, default=150)
++    parser.add_argument('--num_centroids', type=int, default=1000)
+     
+     # training args
+-    parser.add_argument('--epochs', default=10, type=int)
++    parser.add_argument('--epochs', default=100, type=int)
+     parser.add_argument('--num_expert_episodes', default=300, type=int)
+     parser.add_argument('--target_update_rate', default=100, type=int, help='How often to update target network')
+     parser.add_argument('--batch_size', default=1, type=int)
+@@ -152,18 +154,18 @@ if __name__ == '__main__':
+     # Q-learning args
+     parser.add_argument('--discount_factor', default=0.99, type=float)
+     parser.add_argument('--margin', default=0.8, type=float)
+-    parser.add_argument('--horizon', default=10, type=int, help='Horizon for n-step TD error')
++    parser.add_argument('--horizon', default=50, type=int, help='Horizon for n-step TD error')
+     parser.add_argument('--use_one_hot', action='store_true', help='whether to use one-hot representation')
+     
+     # feature extractor args
+     parser.add_argument('--visual_model_cls', choices=['vqvae', 'vae', 'conv'], default='vae', help='Class of the visual_model model')
+     parser.add_argument('--visual_model_path', help='Path to visual_model model')
+-    parser.add_argument('--unfreeze_visual_model', action='store_true', help='Whether to freeze or finetune the feature extractor')
++    parser.add_argument('--unfreeze_visual_model', action='store_true', help='Whether to freeze/finetune the visual mode')
+     
+     # dynamics model args
+     parser.add_argument('--dynamics_model_cls', choices=['mdn', None], default=None, help='Class of the dynamics model')
+     parser.add_argument('--dynamics_model_path', default=None, help='Path to dynamics model')
+-    parser.add_argument('--unfreeze_dynamics_model', action='store_true', help='Whether to freeze or finetune the dynamics model extractor')
++    parser.add_argument('--unfreeze_dynamics_model', action='store_true', help='Whether to freeze/finetune the dynamics model')
+     
+     
+     args = parser.parse_args()
+diff --git a/research_code/DQfD_train.py b/research_code/DQfD_train.py
+index 93086e0..52ef84e 100644
+--- a/research_code/DQfD_train.py
++++ b/research_code/DQfD_train.py
+@@ -11,6 +11,7 @@ from tqdm import tqdm
+ import wandb
+ 
+ from DQfD_models import ConvFeatureExtractor, QNetwork
++from dynamics_models import MDN_RNN
+ from DQfD_utils import CombinedMemory, MemoryDataset, load_expert_demo
+ 
+ def main(
+@@ -35,15 +36,17 @@ def main(
+     beta_0, 
+     agent_p_offset, 
+     expert_p_offset, 
+-    load_from_statedict
++    load_from_statedict,
++    seed,
++    run_id
+ ):
+     
+-    torch.manual_seed(1337)
+-    np.random.seed(1337)
+-    random.seed(1337)
++    torch.manual_seed(seed)
++    np.random.seed(seed)
++    random.seed(seed)
+ 
+     # set save dir
+-    save_path = os.path.join(save_dir, 'q_net.pt')
++    save_path = os.path.join(save_dir, f'q_net_{run_id}_{seed}.pt')
+     print(f'\nSaving model to {save_path}!')
+ 
+ 
+@@ -61,13 +64,16 @@ def main(
+     
+     # init logger
+     config = dict(
++        seed=seed,
+         env_name=env_name,
++        epsilon=epsilon,
+         model_path=model_path,
+         visual_model_cls=q_net.hparams.visual_model_cls.__name__,
+         dynamics_model_cls=q_net.hparams.dynamics_model_cls.__name__ if q_net.hparams.dynamics_model_cls is not None else None
+     )
+-
+-    wandb.init(project='DQfD_training', config=config)
++    mdn = 'mdn' if q_net.hparams.dynamics_model_cls == MDN_RNN else 'none'
++    tags=[q_net.hparams.visual_model_cls.__name__, mdn, f'seed_{seed}']
++    wandb.init(project='DQfD_training', config=config, tags=tags)
+     
+     # set up optimization
+     optimizer = torch.optim.AdamW(q_net.parameters(), lr=lr)
+@@ -139,70 +145,78 @@ def main(
+             else:
+                 q_values = q_net(obs_pov, obs_vec)[0].squeeze()
+             
+-            time0 = time()        
++            # select action
++            if steps % action_repeat == 0:
++                if np.random.rand(1)[0] < epsilon:
++                    action_ind = np.random.randint(centroids.shape[0])
++                    highest_q = q_values[action_ind].cpu().item()
++                else:
++                    action_ind = torch.argmax(q_values, dim=0).cpu().item()
++                    highest_q = q_values[action_ind].cpu().item()
++
++                # remap action to centroid
++                action = {'vector': centroids[action_ind]}
++
+             while not done:    
+                 
+-                # select new action
+-                #time1 = time()
+-                if steps % action_repeat == 0:
+-                    if np.random.rand(1)[0] < epsilon:
+-                        action_ind = np.random.randint(centroids.shape[0])
+-                        highest_q = q_values[action_ind].cpu().item()
+-                    else:
+-                        action_ind = torch.argmax(q_values, dim=0).cpu().item()
+-                        highest_q = q_values[action_ind].cpu().item()
++                # compute next predictive state h_t(a_t-1, z_t-1, h_t-1)
++                if q_net.dynamics_model is not None:
++                    sample, *_ = q_net.dynamics_model.visual_model.encode_only(obs_pov) 
++                    if q_net.dynamics_model.hparams.visual_model_cls == 'vqvae':
++                        sample = einops.rearrange(sample, 'b c d -> b (c d)')
++                    gru_input = torch.cat([sample, obs_vec, torch.from_numpy(action['vector'])[None].to(q_net.device)], dim=1)[None].float()
++                    hidden_states_seq, _ = q_net.dynamics_model.gru(gru_input, torch.from_numpy(predictive_state_list[-1]).float().to(q_net.device)[None,None])
++                    predictive_state_list.append(hidden_states_seq[0,0].detach().cpu().float().numpy())
++                else:
++                    predictive_state_list.append(predictive_state_list[-1]) # add another zero array to the list
+ 
+-                    # remap action to centroid
+-                    action = {'vector': centroids[action_ind]}
+-                #print(f'Selecting an action took {time()-time1}s')
+-                
+                 # env step
+-                #time1 = time()
+                 obs, rew, done, _ = env.step(action)
++
++                if done:
++                    rew = 100 # this is a bug in the minerl environment that I am fixing here.
+                 
+                 # store transition
+                 obs_list.append(obs)
+                 rew_list.append(rew)
+                 action_list.append(action_ind)
+                 
+-                #print(f'Taking a step and storing transition took {time()-time1}s')
+-                
+                 # prepare input
+-                #time1 = time()
+                 obs_pov = torch.from_numpy(einops.rearrange(obs['pov'], 'h w c -> 1 c h w').astype(np.float32) / 255).to(q_net.device)
+                 obs_vec = torch.from_numpy(einops.rearrange(obs['vector'], 'd -> 1 d').astype(np.float32)).to(q_net.device)
+-                #print(f'Preparing input took {time()-time1}s')
+                 
+-                # compute q values
++                # compute q-values
+                 if q_net.dynamics_model is not None:
+-                    sample, *_ = q_net.dynamics_model.visual_model.encode_only(obs_pov) 
+-                    gru_input = torch.cat([sample, obs_vec, torch.from_numpy(action['vector'])[None].to(q_net.device)], dim=1)[None].float()
+-                    hidden_states_seq, _ = q_net.dynamics_model.gru(gru_input)
+-                    predictive_state_list.append(hidden_states_seq[0,0].detach().cpu().float().numpy())
+-            
+-                    # record td_error
++                    q_values = q_net(obs_pov, obs_vec, hidden_states_seq[0])[0].squeeze()
+                     td_error_list.append(np.abs(rew + discount_factor * q_net(obs_pov, obs_vec, hidden_states_seq[0], target=True)[0].squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
+                     
+                 else:
+                     q_values = q_net(obs_pov, obs_vec)[0].squeeze()
+-                    predictive_state_list.append(predictive_state_list[-1]) # add another zero array to the list
+-
+-                    # record td_error
+                     td_error_list.append(np.abs(rew + discount_factor * q_net(obs_pov, obs_vec, target=True)[0].squeeze()[torch.argmax(q_values)].cpu().item() - highest_q))
+                 
+-                #print(obs_list[-1]['vector'].shape)
+-                #print(len(action_list))
+-                #print(predictive_state_list[-1].shape)
++                # select new action
++                if steps % action_repeat == 0:
++                    if np.random.rand(1)[0] < epsilon:
++                        action_ind = np.random.randint(centroids.shape[0])
++                        highest_q = q_values[action_ind].cpu().item()
++                    else:
++                        action_ind = torch.argmax(q_values, dim=0).cpu().item()
++                        highest_q = q_values[action_ind].cpu().item()
+ 
++                    # remap action to centroid
++                    action = {'vector': centroids[action_ind]}
++                
+                 # bookkeeping
+                 total_reward += rew
+                 steps += 1
+                 total_env_steps += 1
+                 if steps >= max_episode_len or total_env_steps == max_env_steps:
++                    print('\nEnding episode prematurely due to step limit!')
+                     break
+ 
+-        print(f'\nEpisode {num_episodes}: Total reward: {total_reward}, Duration: {time()-time0}s')
++        print(f'\nEpisode {num_episodes}: Total reward: {total_reward}')
+         wandb.log({'Training/Episode Reward': total_reward})
++        wandb.log({'Training/Total Steps': total_env_steps})
+ 
+         # store episode into replay memory
+         print('\nAdding episode to memory...')
+@@ -306,7 +320,7 @@ def main(
+         print('\nSaving model')
+         torch.save(q_net.state_dict(), save_path)
+         print('\nUpdating beta...')
+-        beta = min(beta + (1-beta_0)/max_env_steps, 1)
++        beta = min(beta + (1-beta_0)/max_env_steps*steps, 1)
+         wandb.log({'Training/Beta': beta})
+         dataset.update_beta(beta)
+         print('\nUpdating dataloader...')
+@@ -316,18 +330,20 @@ def main(
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--env_name', default='MineRLNavigateDenseVectorObf-v0')
++    parser.add_argument('--seed', type=int, default=0)
++    parser.add_argument('--run_id', type=str, default='default')
+     parser.add_argument('--centroids_path', default='/home/lieberummaas/datadisk/minerl/data')
+-    parser.add_argument('--num_centroids', type=int, default=150)
++    parser.add_argument('--num_centroids', type=int, default=1000)
+     parser.add_argument('--save_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
+     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
+     parser.add_argument('--max_episode_len', type=int, default=3000)
+     parser.add_argument('--max_env_steps', type=int, default=100000)
+     parser.add_argument('--num_expert_episodes', type=int, default=194)
+-    parser.add_argument('--horizon', type=int, default=10)
++    parser.add_argument('--horizon', type=int, default=50)
+     parser.add_argument('--batch_size', type=int, default=100)
+     parser.add_argument('--action_repeat', type=int, default=1)
+     parser.add_argument('--lr', type=float, default=3e-4)
+-    parser.add_argument('--epsilon', type=float, default=0.01)
++    parser.add_argument('--epsilon', type=float, default=0.05)
+     parser.add_argument('--alpha', type=float, default=0.4, help='PER exponent')
+     parser.add_argument('--beta_0', type=float, default=0.6, help='Initial PER Importance Sampling exponent')
+     parser.add_argument('--agent_p_offset', type=float, default=0.001)
+diff --git a/research_code/DQfD_utils.py b/research_code/DQfD_utils.py
+index 250f77f..bc3d0a2 100644
+--- a/research_code/DQfD_utils.py
++++ b/research_code/DQfD_utils.py
+@@ -101,8 +101,10 @@ class CombinedMemory(object):
+             self.concat_memo = self.memory_dict[memory_id].memory
+ 
+         elif memory_id == 'agent':
+-            print(f"{len(self.memory_dict['expert'].memory) = }")
+-            print(f"{len(self.memory_dict['agent'].memory) = }")
++            # print(f"{len(self.memory_dict['expert'].memory) = }")
++            # print(f"{len(self.memory_dict['agent'].memory) = }")
++            # print(f"{len(self.memory_dict['expert'].memory[0]) = }")
++            # print(f"{len(self.memory_dict['agent'].memory[0]) = }")
+             self.concat_memo = np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])
+    
+     def __getitem__(self, idx):
+@@ -222,7 +224,9 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
+             pov_obs = einops.rearrange(torch.from_numpy(np.array(list(map(lambda x: x['pov'], obs))).astype(np.float32) / 255), ' t h w c -> t c h w').to(dynamics_model.device)
+             vec_obs = torch.from_numpy(np.array(list(map(lambda x: x['vector'], obs))).astype(np.float32)).to(dynamics_model.device)
+             torch_actions = torch.from_numpy(centroids[np.array(actions)].astype(np.float32)).to(dynamics_model.device)
+-            sample, *_ = dynamics_model.visual_model.encode_only(pov_obs) 
++            sample, *_ = dynamics_model.visual_model.encode_only(pov_obs)
++            if dynamics_model.hparams.visual_model_cls == 'vqvae':
++                sample = einops.rearrange(sample, 'b c d -> b (c d)')
+             gru_input = torch.cat([sample, vec_obs, torch_actions], dim=1)[None]
+             hidden_states_seq, _ = dynamics_model.gru(gru_input)
+             predictive_state = hidden_states_seq[0]
+@@ -234,7 +238,6 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
+         combined_memory.add_episode(obs, actions, rewards, td_errors, predictive_state, memory_id='expert')
+         print(f'Reward: {np.sum(rewards)}\n')
+ 
+-
+     print('\nLoaded ',len(combined_memory.memory_dict['expert']),' expert samples!')
+ 
+     return combined_memory
+\ No newline at end of file
+diff --git a/research_code/datasets.py b/research_code/datasets.py
+index 1349001..89936ac 100755
+--- a/research_code/datasets.py
++++ b/research_code/datasets.py
+@@ -254,6 +254,7 @@ class TrajectoryIterData(IterableDataset):
+         self.names = self.pipeline.get_trajectory_names()
+         self.names.sort()
+         
++        # there is something off with these trajectories -> extremely large spike in TD-error
+         blacklist = [
+             'v3_right_basil_dragon-15_4328-4804',
+             'v3_kindly_lemon_mummy-2_59830-60262',
+@@ -288,8 +289,8 @@ class TrajectoryIterData(IterableDataset):
+         rewards = np.array(rewards).astype(np.float32)
+         
+         # EXPERIMENTAL
+-        print('Warning, setting last reward to 0')
+-        rewards[-1] = 0
++        # print('Warning, setting last reward to 1')
++        # rewards[-1] = 1
+         
+         if self.centroids is not None:
+             # compute action idcs
+diff --git a/research_code/dynamics_models.py b/research_code/dynamics_models.py
+index 092456e..267ebe6 100755
+--- a/research_code/dynamics_models.py
++++ b/research_code/dynamics_models.py
+@@ -1,32 +1,22 @@
++from time import time
++
++import einops
++import matplotlib.pyplot as plt
++import numpy as np
++import pytorch_lightning as pl
+ import torch
+ import torch.nn as nn
+-import pytorch_lightning as pl
+-import numpy as np
+-import matplotlib.pyplot as plt
+ import torchdiffeq as teq
+-import einops
+ 
+ from vae_model import VAE
+ from vqvae import VQVAE
+-#from reward_model import RewardMLP
+ 
+-from time import time
+ 
+ visual_model_by_str = {
+     'vae':VAE,
+     'vqvae':VQVAE
+ }
+ 
+-class MDNRNNReward(nn.Module):
+-    def __init__(self, mdn_path, reward_path):
+-        super().__init__()
+-        self.mdn = MDN_RNN.load_from_checkpoint(mdn_path)
+-        self.reward_model = RewardMLP.load_from_checkpoint(reward_path)
+-    
+-    def forward(self, state, action, h_n, c_n, batched=True):
+-        _, state, (h_n, c_n), _, _ = self.mdn.forward_latent(state, action, h_n, c_n, batched)
+-        rew = self.reward_model(state[...,-64:])
+-        return state, rew, (h_n, c_n)
+         
+ class MDN_RNN(pl.LightningModule):
+     def __init__(
+@@ -37,8 +27,9 @@ class MDN_RNN(pl.LightningModule):
+         num_components=5, 
+         visual_model_path='', 
+         visual_model_cls='vae', 
+-        curriculum_threshold=3.0, 
++        # curriculum_threshold=3.0, 
+         curriculum_start=0, 
++        max_forecast=10,
+         use_one_hot=False
+     ):
+         super().__init__()
+@@ -80,11 +71,9 @@ class MDN_RNN(pl.LightningModule):
+                 nn.Linear(gru_kwargs['hidden_size'], num_components + num_components * 2 * self.latent_dim + 64)
+             )
+         
+-        self.ce_loss = nn.CrossEntropyLoss()
+-
+     def _step(self, batch):
+         # unpack batch
+-        pov, vec, actions, _ = batch
++        pov, vec, actions, *_ = batch
+ 
+         # make predictions
+         if self.hparams.visual_model_cls == 'vqvae':
+@@ -149,7 +138,6 @@ class MDN_RNN(pl.LightningModule):
+         return einops.rearrange(sample, 'b n d -> b (n d)')
+ 
+ 
+-
+     def forward(self, pov, vec, actions, last_hidden=None):
+         '''
+         Given a sequence of pov, vec and actions, computes priors over next latent
+@@ -329,16 +317,23 @@ class MDN_RNN(pl.LightningModule):
+         self.log('Training/vec_loss',vec_loss)
+ 
+         return loss
++    
++    def validation_step(self, batch, batch_idx):
++        # perform predictions and compute loss
++        pov_loss, vec_loss = self._step(batch)
++        loss = pov_loss + vec_loss
++        
++        # score and log predictions
++        self.log('Validation/loss', loss,)
++        self.log('Validation/pov_loss',pov_loss)
++        self.log('Validation/vec_loss',vec_loss)
++
++        return loss
+         
+     def validation_epoch_end(self, batch_losses):
+         # check whether to go to next step in curriculum, 
+         # but only if latent overshooting is active
+-        '''
+-        if self.hparams.latent_overshooting:
+-            mean_loss = torch.tensor(batch_losses).mean()
+-            self._check_curriculum_cond(mean_loss)
+-        '''
+-        pass
++        self._check_curriculum_cond()
+     
+     def configure_optimizers(self):
+         # set up optimizer
+@@ -346,19 +341,19 @@ class MDN_RNN(pl.LightningModule):
+         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs, weight_decay=0)
+         return optimizer
+ 
+-    def _init_curriculum(self, seq_len=None, curriculum_start=0):
++    def _init_curriculum(self, max_forecast=None, curriculum_start=0):
+         self.curriculum_step = 0
+-        self.curriculum = [0]
+-        '''
+-        if seq_len is None:
+-            seq_len = self.hparams.seq_len
+-        self.curriculum = [i for i in range(seq_len-2)]
++        if max_forecast is None:
++            max_forecast = self.hparams.max_forecast
++        self.curriculum = [i for i in range(max_forecast-2)]
+         self.curriculum_step = curriculum_start
+-        '''
+         
+-    def _check_curriculum_cond(self, value):
++    def _check_curriculum_cond(self):
+         if self.curriculum_step < len(self.curriculum)-1:
+-            if value < self.hparams.curriculum_threshold:
++            # if value < self.hparams.curriculum_threshold:
++                # self.curriculum_step += 1
++                # print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
++            if (self.current_epoch + 1) % 10 == 0:
+                 self.curriculum_step += 1
+                 print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
+         
+diff --git a/research_code/env_wrappers.py b/research_code/env_wrappers.py
+deleted file mode 100755
+index a8b7ac7..0000000
+--- a/research_code/env_wrappers.py
++++ /dev/null
+@@ -1,39 +0,0 @@
+-import gym
+-
+-class ClusteredActions(gym.Wrapper):
+-    def __init__(self, env, action_centroids):
+-        ''' 
+-        Basically copied from MineRL Research Track BC baseline.
+-        Wrapper around an action space, that remaps a discrete action to the corresponding centroid.
+-        The wrapped environment accepts a positive integer action and maps it to the corresponding centroid.
+-        Args:
+-            env - gym environment instance
+-            action_centroids - centroids returned by KMeans on action data
+-        '''
+-        super().__init__(env)
+-
+-        # save centroids
+-        self.action_centroids = action_centroids
+-        
+-        # get num centroids
+-        self.n_clusters = len(self.action_centroids)
+-        print(f'Wrapping environment to use {self.n_clusters} discrete actions instead..')
+-
+-        # save env
+-        self.base_env = env
+-
+-        # modify action space to discrete --> choose between centroids
+-        self.action_space = gym.spaces.Discrete(len(self.action_centroids))
+-
+-    def step(self, action):
+-        # remap action to vector
+-        action_vec = self.remap_action(action)
+-        
+-        # take step
+-        return self.base_env.step(action_vec)
+-    
+-    def remap_action(self, action):
+-        # re-map discrete action to centroid
+-        action_vec = {'vector':self.action_centroids[action]}
+-        
+-        return action_vec
+\ No newline at end of file
+diff --git a/research_code/eval_pretrained_dqfd.py b/research_code/eval_pretrained_dqfd.py
+index 108fdb0..b87f8b9 100644
+--- a/research_code/eval_pretrained_dqfd.py
++++ b/research_code/eval_pretrained_dqfd.py
+@@ -1,19 +1,20 @@
+ import argparse
+-import torch
+-import gym
+ import os
+ import random
++from time import time
++
++import cv2
+ import einops 
++import gym
+ import numpy as np
+-import cv2
+-from time import time
++import torch
+ 
+-from PretrainDQN import QNetwork
++from DQfD_models import QNetwork
+ 
+ def main(
+     env_name,
+-    log_dir,
+-    data_dir,
++    centroids_dir,
++    num_centroids,
+     num_episodes,
+     max_episode_len,
+     model_path,
+@@ -26,13 +27,13 @@ def main(
+     q_net.eval()
+ 
+     # set run id
+-    video_dir = os.path.join(video_dir, env_name, q_net.feature_extractor.__class__.__name__, str(int(time())))
++    video_dir = os.path.join(video_dir, env_name, q_net.visual_model.__class__.__name__, str(int(time())))
+ 
+     # check that video_dir exists
+     os.makedirs(video_dir, exist_ok=True)
+     
+     # load clusters
+-    clusters = np.load(os.path.join(data_dir, env_name + "_150_centroids.npy"))
++    clusters = np.load(os.path.join(centroids_dir, env_name + f"_{num_centroids}_centroids.npy"))
+ 
+     # init env
+     env = gym.make(env_name)
+@@ -91,8 +92,8 @@ def main(
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--env_name', type=str, default='MineRLNavigateDenseVectorObf-v0')
+-    parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerl/run_logs/')
+-    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
++    parser.add_argument('--centroids_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
++    parser.add_argument('--num_centroids', type=int, default=150)
+     parser.add_argument('--num_episodes', type=int, default=2)
+     parser.add_argument('--max_episode_len', type=int, default=2000)
+     parser.add_argument('--model_path', type=str, required=True)
+diff --git a/research_code/train_DynamicsModel.py b/research_code/train_DynamicsModel.py
+index 5d3569f..e23e1cc 100755
+--- a/research_code/train_DynamicsModel.py
++++ b/research_code/train_DynamicsModel.py
+@@ -38,11 +38,11 @@ class PredictionCallback(pl.Callback):
+ 
+         if isinstance(dataset, datasets.DynamicsData):
+             iterator = iter(dataset)
+-            for _ in range(2000):
++            for _ in range(1000):
+                 b = next(iterator)
+             pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iterator)[:-1])
+         elif isinstance(dataset, datasets.TrajectoryData):
+-            pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[3][:3])
++            pov, vec_obs, act = map(lambda x: x[None,100:100+seq_len], dataset[10][:3])
+         else:
+             raise NotImplementedError
+ 
+@@ -141,10 +141,11 @@ def train_DynamicsModel(
+     gru_hidden_size,
+     load_from_checkpoint, 
+     checkpoint_path,
+-    curriculum_threshold, 
+     curriculum_start,
+     save_freq,
+-    use_one_hot
++    use_one_hot,
++    num_centroids,
++    num_workers
+ ):
+     
+     pl.seed_everything(1337)
+@@ -166,7 +167,6 @@ def train_DynamicsModel(
+         'optim_kwargs':optim_kwargs,
+         'visual_model_cls':visual_model_cls,
+         'num_components':num_components,
+-        'curriculum_threshold':curriculum_threshold,
+         'curriculum_start':curriculum_start,
+         'use_one_hot':use_one_hot
+     }
+@@ -180,20 +180,26 @@ def train_DynamicsModel(
+         model = MDN_RNN(**model_kwargs)
+ 
+     # load data
++    print(f'\nUsing {num_centroids} action centroids!')
++    centroids = np.load(os.path.join(data_dir, env_name + f'_{num_centroids}_centroids.npy'))
+     if use_whole_trajectories:
+-        train_data = datasets.TrajectoryData(env_name, data_dir)
++        data = datasets.TrajectoryData(env_name, data_dir, centroids=centroids)
+     else:
+         raise NotImplementedError("If you want to use this, make sure to only train on action centroids")
+         #train_data = datasets.DynamicsData(env_name, data_dir, seq_len, batch_size)
+     
+-    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
+-
+-    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+     prediction_callback = PredictionCallback(
+         every_n_batches=save_freq,
+-        dataset=train_data,
+-        seq_len=10
++        dataset=data,
++        seq_len=50
+     )
++    
++
++    train_data, val_data = torch.utils.data.random_split(data, [int(len(data)*0.9), len(data)-int(len(data)*0.9)])
++    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
++    val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
++
++    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+     callbacks = [model_checkpoint, prediction_callback]
+     config = dict(
+         env_name=env_name,
+@@ -213,7 +219,7 @@ def train_DynamicsModel(
+         default_root_dir=log_dir,
+         max_epochs=num_epochs,
+     )
+-    trainer.fit(model, train_loader)
++    trainer.fit(model, train_loader, val_loader)
+ 
+ if __name__=='__main__':
+     parser = argparse.ArgumentParser()
+@@ -231,10 +237,11 @@ if __name__=='__main__':
+     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
+     parser.add_argument('--load_from_checkpoint', action='store_true')
+     parser.add_argument('--checkpoint_path', default=None, type=str)
++    parser.add_argument('--num_centroids', default=1000, type=int)
++    parser.add_argument('--num_workers', default=6, type=int)
+     
+     # sequence learning args
+     # parser.add_argument('--latent_overshooting', action='store_true')
+-    parser.add_argument('--curriculum_threshold', default=3, type=float)
+     parser.add_argument('--curriculum_start', default=0, type=int)
+ 
+     # visual model args
+diff --git a/research_code/vae_model.py b/research_code/vae_model.py
+index bdc785a..c3ff349 100644
+--- a/research_code/vae_model.py
++++ b/research_code/vae_model.py
+@@ -155,33 +155,11 @@ class VAEEncoder(nn.Module):
+             Rearrange('b c h w -> b (c h w)'),
+             nn.Linear(1024, 2*latent_dim)
+         )
+-        '''
+-        self.net = nn.Sequential(
+-            nn.Conv2d(input_channels, n_hid, 4, stride=2, padding=1),
+-            nn.ReLU(inplace=True),
+-            nn.Conv2d(n_hid, 2*n_hid, 4, stride=2, padding=1),
+-            nn.ReLU(inplace=True),
+-            nn.Conv2d(2*n_hid, 2*n_hid, 3, padding=1),
+-            nn.ReLU(),
+-            ResBlock(2*n_hid, 2*n_hid//4),
+-            ResBlock(2*n_hid, 2*n_hid//4), # --> shape is (...., 16, 16)
+-            nn.ReLU(),
+-            nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1),
+-            nn.ReLU(),
+-            nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1), # (.... 4, 4)
+-            nn.ReLU(),
+-            Rearrange('b c h w -> b (c h w)'),
+-            nn.Linear(2*n_hid*16, 2*latent_dim)
+-        )'''
+ 
+     def forward(self, x):
+-        #out = self.net(x)
+-        #print('\nEncoder:')
+         out = x
+         for m in self.net:
+-        #    print(out.shape)
+             out = m(out)
+-        #print(out.shape)
+         mean, log_std = torch.chunk(out, chunks=2, dim=-1)        
+         return mean, log_std
+ 
+@@ -191,24 +169,6 @@ class VAEDecoder(nn.Module):
+     def __init__(self, latent_dim=64, n_init=64, n_hid=64, output_channels=3):
+         super().__init__()
+ 
+-        '''
+-        self.net = nn.Sequential(
+-            Rearrange('b (h w c) -> b c h w', w=4, h=4),
+-            nn.Conv2d(64, n_init, 3, padding=1),
+-            nn.UpsamplingNearest2d((8,8)),
+-            nn.ReLU(),
+-            nn.Conv2d(n_init, n_init, 3, padding=1),
+-            nn.UpsamplingNearest2d((16,16)),
+-            nn.ReLU(),
+-            nn.Conv2d(n_init, 2*n_hid, 3, padding=1),
+-            nn.ReLU(),
+-            ResBlock(2*n_hid, 2*n_hid//4),
+-            ResBlock(2*n_hid, 2*n_hid//4),
+-            nn.ConvTranspose2d(2*n_hid, n_hid, 4, stride=2, padding=1),
+-            nn.ReLU(inplace=True),
+-            nn.ConvTranspose2d(n_hid, output_channels, 4, stride=2, padding=1),
+-        )
+-        '''
+         self.net = nn.Sequential(
+             nn.Linear(latent_dim, 1024),
+             Rearrange('b d -> b d 1 1'),
+@@ -218,17 +178,12 @@ class VAEDecoder(nn.Module):
+             nn.ReLU(),
+             nn.ConvTranspose2d(64, 32, 6, 2),
+             nn.ReLU(),
+-            nn.ConvTranspose2d(32, 3, 6, 2),
+-            #nn.Sigmoid(),
++            nn.ConvTranspose2d(32, 3, 6, 2)
+         )
+         
+ 
+     def forward(self, x):
+-        #print('\nDecoder:')
+         out = x
+         for m in self.net:
+-        #    print(out.shape)
+             out = m(out)
+-        #print(out.shape)
+         return out
+-        #return self.net(x)
+diff --git a/research_code/vqvae.py b/research_code/vqvae.py
+index 9d4b339..dbd0408 100644
+--- a/research_code/vqvae.py
++++ b/research_code/vqvae.py
+@@ -57,7 +57,7 @@ class SeparateQuantizer(nn.Module):
+         qy = F.softmax(logits, dim=2)
+         diff = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=2).mean()
+ 
+-        ind = soft_one_hot.argmax(dim=1)
++        ind = soft_one_hot.argmax(dim=2)
+         return z_q, diff, ind, logits
+ 
+     def embed_one_hot(self, embed_vec):
+diff --git a/research_code/vqvae_sweep.sh b/research_code/vqvae_sweep.sh
+index 889f0f4..51c0bce 100644
+--- a/research_code/vqvae_sweep.sh
++++ b/research_code/vqvae_sweep.sh
+@@ -2,10 +2,7 @@
+ LOGDIR="/home/lieberummaas/datadisk/minerl/experiment_logs"
+ NUM_EPOCHS=1
+ 
+-echo "Now training with 16 embeddings, 128 num_variables, 64 embedding_dim"
+-python vqvae.py --num_epochs 1 --log_dir $LOGDIR --num_embeddings 16 --num_variables 128 --embedding_dim 64 #--suffix $(printf $num_embeddings)
+-
+-for num_embeddings in 32 64 128
++for num_embeddings in 16 32 64 128
+     do
+         for num_variables in 16 32 64 128
+             do
+diff --git a/research_code/wandb/latest-run b/research_code/wandb/latest-run
+index d5a281c..8c0e1bc 120000
+--- a/research_code/wandb/latest-run
++++ b/research_code/wandb/latest-run
+@@ -1 +1 @@
+-run-20211018_092139-gm0lvmsh
+\ No newline at end of file
++run-20211025_080900-2z4ir96b
+\ No newline at end of file

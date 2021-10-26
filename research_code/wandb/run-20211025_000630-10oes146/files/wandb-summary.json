@@ -1,0 +1,1 @@
+{"Num Episodes": 19, "Episode steps": 4000, "Episode reward": 34.02187156677246, "_runtime": 2569, "_timestamp": 1635122959, "_step": 20, "mean_rew": 65.20101474821567, "std_rew": 48.877570618392966, "_wandb": {"runtime": 2574}}

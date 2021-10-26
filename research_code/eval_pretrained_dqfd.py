@@ -1,19 +1,20 @@
 import argparse
-import torch
-import gym
 import os
 import random
-import einops 
-import numpy as np
-import cv2
 from time import time
 
-from PretrainDQN import QNetwork
+import cv2
+import einops 
+import gym
+import numpy as np
+import torch
+
+from DQfD_models import QNetwork
 
 def main(
     env_name,
-    log_dir,
-    data_dir,
+    centroids_dir,
+    num_centroids,
     num_episodes,
     max_episode_len,
     model_path,
@@ -26,13 +27,13 @@ def main(
     q_net.eval()
 
     # set run id
-    video_dir = os.path.join(video_dir, env_name, q_net.feature_extractor.__class__.__name__, str(int(time())))
+    video_dir = os.path.join(video_dir, env_name, q_net.visual_model.__class__.__name__, str(int(time())))
 
     # check that video_dir exists
     os.makedirs(video_dir, exist_ok=True)
     
     # load clusters
-    clusters = np.load(os.path.join(data_dir, env_name + "_150_centroids.npy"))
+    clusters = np.load(os.path.join(centroids_dir, env_name + f"_{num_centroids}_centroids.npy"))
 
     # init env
     env = gym.make(env_name)
@@ -91,8 +92,8 @@ def main(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', type=str, default='MineRLNavigateDenseVectorObf-v0')
-    parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerl/run_logs/')
-    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
+    parser.add_argument('--centroids_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
+    parser.add_argument('--num_centroids', type=int, default=150)
     parser.add_argument('--num_episodes', type=int, default=2)
     parser.add_argument('--max_episode_len', type=int, default=2000)
     parser.add_argument('--model_path', type=str, required=True)

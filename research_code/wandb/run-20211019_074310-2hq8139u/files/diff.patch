@@ -1,0 +1,198 @@
+diff --git a/research_code/DQfD_models.py b/research_code/DQfD_models.py
+index e3f4d54..f2fe617 100644
+--- a/research_code/DQfD_models.py
++++ b/research_code/DQfD_models.py
+@@ -201,6 +201,24 @@ class QNetwork(pl.LightningModule):
+     
+         n_step_rewards = F.conv1d(rewards[None,None,:], discount_array[None,None,:], padding=self.hparams.horizon)[0,0,:-1]
+         n_step_rewards = n_step_rewards[self.hparams.horizon:]
++
++        # verifying
++        print(f'{rewards.shape = }')
++        nsr = []
++        for i in range(len(rewards)):
++            nsr.append((discount_array[:len(rewards)-i] * rewards[i:i+self.hparams.horizon]).sum().detach().cpu().numpy())
++        nsr = np.array(nsr)
++
++        print(f'{nsr.shape = }')
++        print(f'{n_step_rewards.shape = }')
++        print(f'\n\n{rewards[:self.hparams.horizon]}\n\n')
++        print(f'\n\n{nsr[:self.hparams.horizon]}\n\n')
++        print(f'\n\n{n_step_rewards[:self.hparams.horizon]}\n\n')
++        assert np.allclose(nsr, n_step_rewards.detach().cpu().numpy())
++        
++        raise ValueError()
++
++
+         return n_step_rewards
+ 
+     def training_step(self, batch, batch_idx):
+diff --git a/research_code/datasets.py b/research_code/datasets.py
+index 1349001..b3dd24a 100755
+--- a/research_code/datasets.py
++++ b/research_code/datasets.py
+@@ -254,6 +254,7 @@ class TrajectoryIterData(IterableDataset):
+         self.names = self.pipeline.get_trajectory_names()
+         self.names.sort()
+         
++        # there is something off with these trajectories -> extremely large spike in TD-error
+         blacklist = [
+             'v3_right_basil_dragon-15_4328-4804',
+             'v3_kindly_lemon_mummy-2_59830-60262',
+diff --git a/research_code/dynamics_models.py b/research_code/dynamics_models.py
+index 092456e..3c0bfd6 100755
+--- a/research_code/dynamics_models.py
++++ b/research_code/dynamics_models.py
+@@ -37,7 +37,7 @@ class MDN_RNN(pl.LightningModule):
+         num_components=5, 
+         visual_model_path='', 
+         visual_model_cls='vae', 
+-        curriculum_threshold=3.0, 
++        # curriculum_threshold=3.0, 
+         curriculum_start=0, 
+         use_one_hot=False
+     ):
+@@ -80,8 +80,6 @@ class MDN_RNN(pl.LightningModule):
+                 nn.Linear(gru_kwargs['hidden_size'], num_components + num_components * 2 * self.latent_dim + 64)
+             )
+         
+-        self.ce_loss = nn.CrossEntropyLoss()
+-
+     def _step(self, batch):
+         # unpack batch
+         pov, vec, actions, _ = batch
+@@ -329,16 +327,24 @@ class MDN_RNN(pl.LightningModule):
+         self.log('Training/vec_loss',vec_loss)
+ 
+         return loss
++    
++    def validation_step(self, batch, batch_idx):
++        # perform predictions and compute loss
++        pov_loss, vec_loss = self._step(batch)
++        loss = pov_loss + vec_loss
++        
++        # score and log predictions
++        self.log('Validation/loss', loss,)
++        self.log('Validation/pov_loss',pov_loss)
++        self.log('Validation/vec_loss',vec_loss)
++
++        return loss
+         
+     def validation_epoch_end(self, batch_losses):
+         # check whether to go to next step in curriculum, 
+         # but only if latent overshooting is active
+-        '''
+         if self.hparams.latent_overshooting:
+-            mean_loss = torch.tensor(batch_losses).mean()
+-            self._check_curriculum_cond(mean_loss)
+-        '''
+-        pass
++            self._check_curriculum_cond()
+     
+     def configure_optimizers(self):
+         # set up optimizer
+@@ -348,17 +354,17 @@ class MDN_RNN(pl.LightningModule):
+ 
+     def _init_curriculum(self, seq_len=None, curriculum_start=0):
+         self.curriculum_step = 0
+-        self.curriculum = [0]
+-        '''
+         if seq_len is None:
+             seq_len = self.hparams.seq_len
+         self.curriculum = [i for i in range(seq_len-2)]
+         self.curriculum_step = curriculum_start
+-        '''
+         
+-    def _check_curriculum_cond(self, value):
++    def _check_curriculum_cond(self):
+         if self.curriculum_step < len(self.curriculum)-1:
+-            if value < self.hparams.curriculum_threshold:
++            # if value < self.hparams.curriculum_threshold:
++                # self.curriculum_step += 1
++                # print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
++            if (self.current_epoch + 1) % 10 == 0:
+                 self.curriculum_step += 1
+                 print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
+         
+diff --git a/research_code/train_DynamicsModel.py b/research_code/train_DynamicsModel.py
+index 5d3569f..d0988ca 100755
+--- a/research_code/train_DynamicsModel.py
++++ b/research_code/train_DynamicsModel.py
+@@ -38,11 +38,11 @@ class PredictionCallback(pl.Callback):
+ 
+         if isinstance(dataset, datasets.DynamicsData):
+             iterator = iter(dataset)
+-            for _ in range(2000):
++            for _ in range(1000):
+                 b = next(iterator)
+             pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iterator)[:-1])
+         elif isinstance(dataset, datasets.TrajectoryData):
+-            pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[3][:3])
++            pov, vec_obs, act = map(lambda x: x[None,100:100+seq_len], dataset[10][:3])
+         else:
+             raise NotImplementedError
+ 
+@@ -181,19 +181,23 @@ def train_DynamicsModel(
+ 
+     # load data
+     if use_whole_trajectories:
+-        train_data = datasets.TrajectoryData(env_name, data_dir)
++        data = datasets.TrajectoryData(env_name, data_dir)
+     else:
+         raise NotImplementedError("If you want to use this, make sure to only train on action centroids")
+         #train_data = datasets.DynamicsData(env_name, data_dir, seq_len, batch_size)
+     
+-    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
+-
+-    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+     prediction_callback = PredictionCallback(
+         every_n_batches=save_freq,
+-        dataset=train_data,
+-        seq_len=10
++        dataset=data,
++        seq_len=50
+     )
++    
++
++    train_data, val_data = torch.utils.data.random_split(data, [int(len(data)*0.9), int(len(data)*0.1)])
++    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
++    val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=1, pin_memory=True)
++
++    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+     callbacks = [model_checkpoint, prediction_callback]
+     config = dict(
+         env_name=env_name,
+@@ -213,7 +217,7 @@ def train_DynamicsModel(
+         default_root_dir=log_dir,
+         max_epochs=num_epochs,
+     )
+-    trainer.fit(model, train_loader)
++    trainer.fit(model, train_loader, val_loader)
+ 
+ if __name__=='__main__':
+     parser = argparse.ArgumentParser()
+diff --git a/research_code/vqvae_sweep.sh b/research_code/vqvae_sweep.sh
+index 889f0f4..51c0bce 100644
+--- a/research_code/vqvae_sweep.sh
++++ b/research_code/vqvae_sweep.sh
+@@ -2,10 +2,7 @@
+ LOGDIR="/home/lieberummaas/datadisk/minerl/experiment_logs"
+ NUM_EPOCHS=1
+ 
+-echo "Now training with 16 embeddings, 128 num_variables, 64 embedding_dim"
+-python vqvae.py --num_epochs 1 --log_dir $LOGDIR --num_embeddings 16 --num_variables 128 --embedding_dim 64 #--suffix $(printf $num_embeddings)
+-
+-for num_embeddings in 32 64 128
++for num_embeddings in 16 32 64 128
+     do
+         for num_variables in 16 32 64 128
+             do
+diff --git a/research_code/wandb/latest-run b/research_code/wandb/latest-run
+index d5a281c..930540a 120000
+--- a/research_code/wandb/latest-run
++++ b/research_code/wandb/latest-run
+@@ -1 +1 @@
+-run-20211018_092139-gm0lvmsh
+\ No newline at end of file
++run-20211019_074310-2hq8139u
+\ No newline at end of file

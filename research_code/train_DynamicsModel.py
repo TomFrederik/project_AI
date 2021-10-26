@@ -36,13 +36,8 @@ class PredictionCallback(pl.Callback):
         self.every_n_epochs = every_n_epochs
         self.every_n_batches = every_n_batches
 
-        if isinstance(dataset, datasets.DynamicsData):
-            iterator = iter(dataset)
-            for _ in range(2000):
-                b = next(iterator)
-            pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iterator)[:-1])
-        elif isinstance(dataset, datasets.TrajectoryData):
-            pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[3][:3])
+        if isinstance(dataset, datasets.TrajectoryData):
+            pov, vec_obs, act = map(lambda x: x[None,100:100+seq_len], dataset[10][:3])
         else:
             raise NotImplementedError
 
@@ -141,10 +136,11 @@ def train_DynamicsModel(
     gru_hidden_size,
     load_from_checkpoint, 
     checkpoint_path,
-    curriculum_threshold, 
     curriculum_start,
     save_freq,
-    use_one_hot
+    use_one_hot,
+    num_centroids,
+    num_workers
 ):
     
     pl.seed_everything(1337)
@@ -166,7 +162,6 @@ def train_DynamicsModel(
         'optim_kwargs':optim_kwargs,
         'visual_model_cls':visual_model_cls,
         'num_components':num_components,
-        'curriculum_threshold':curriculum_threshold,
         'curriculum_start':curriculum_start,
         'use_one_hot':use_one_hot
     }
@@ -180,20 +175,26 @@ def train_DynamicsModel(
         model = MDN_RNN(**model_kwargs)
 
     # load data
+    print(f'\nUsing {num_centroids} action centroids!')
+    centroids = np.load(os.path.join(data_dir, env_name + f'_{num_centroids}_centroids.npy'))
     if use_whole_trajectories:
-        train_data = datasets.TrajectoryData(env_name, data_dir)
+        data = datasets.TrajectoryData(env_name, data_dir, centroids=centroids)
     else:
         raise NotImplementedError("If you want to use this, make sure to only train on action centroids")
         #train_data = datasets.DynamicsData(env_name, data_dir, seq_len, batch_size)
     
-    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
-
-    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
     prediction_callback = PredictionCallback(
         every_n_batches=save_freq,
-        dataset=train_data,
-        seq_len=10
+        dataset=data,
+        seq_len=50
     )
+    
+
+    train_data, val_data = torch.utils.data.random_split(data, [int(len(data)*0.9), len(data)-int(len(data)*0.9)])
+    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+
+    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
     callbacks = [model_checkpoint, prediction_callback]
     config = dict(
         env_name=env_name,
@@ -213,7 +214,7 @@ def train_DynamicsModel(
         default_root_dir=log_dir,
         max_epochs=num_epochs,
     )
-    trainer.fit(model, train_loader)
+    trainer.fit(model, train_loader, val_loader)
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
@@ -231,10 +232,11 @@ if __name__=='__main__':
     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
     parser.add_argument('--load_from_checkpoint', action='store_true')
     parser.add_argument('--checkpoint_path', default=None, type=str)
+    parser.add_argument('--num_centroids', default=1000, type=int)
+    parser.add_argument('--num_workers', default=6, type=int)
     
     # sequence learning args
     # parser.add_argument('--latent_overshooting', action='store_true')
-    parser.add_argument('--curriculum_threshold', default=3, type=float)
     parser.add_argument('--curriculum_start', default=0, type=int)
 
     # visual model args

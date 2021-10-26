@@ -1,32 +1,22 @@
+from time import time
+
+import einops
+import matplotlib.pyplot as plt
+import numpy as np
+import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-import pytorch_lightning as pl
-import numpy as np
-import matplotlib.pyplot as plt
 import torchdiffeq as teq
-import einops
 
 from vae_model import VAE
 from vqvae import VQVAE
-#from reward_model import RewardMLP
 
-from time import time
 
 visual_model_by_str = {
     'vae':VAE,
     'vqvae':VQVAE
 }
 
-class MDNRNNReward(nn.Module):
-    def __init__(self, mdn_path, reward_path):
-        super().__init__()
-        self.mdn = MDN_RNN.load_from_checkpoint(mdn_path)
-        self.reward_model = RewardMLP.load_from_checkpoint(reward_path)
-    
-    def forward(self, state, action, h_n, c_n, batched=True):
-        _, state, (h_n, c_n), _, _ = self.mdn.forward_latent(state, action, h_n, c_n, batched)
-        rew = self.reward_model(state[...,-64:])
-        return state, rew, (h_n, c_n)
         
 class MDN_RNN(pl.LightningModule):
     def __init__(
@@ -37,8 +27,9 @@ class MDN_RNN(pl.LightningModule):
         num_components=5, 
         visual_model_path='', 
         visual_model_cls='vae', 
-        curriculum_threshold=3.0, 
+        # curriculum_threshold=3.0, 
         curriculum_start=0, 
+        max_forecast=10,
         use_one_hot=False
     ):
         super().__init__()
@@ -80,11 +71,9 @@ class MDN_RNN(pl.LightningModule):
                 nn.Linear(gru_kwargs['hidden_size'], num_components + num_components * 2 * self.latent_dim + 64)
             )
         
-        self.ce_loss = nn.CrossEntropyLoss()
-
     def _step(self, batch):
         # unpack batch
-        pov, vec, actions, _ = batch
+        pov, vec, actions, *_ = batch
 
         # make predictions
         if self.hparams.visual_model_cls == 'vqvae':
@@ -147,7 +136,6 @@ class MDN_RNN(pl.LightningModule):
         sample = torch.stack(sample, dim=1)
         
         return einops.rearrange(sample, 'b n d -> b (n d)')
-
 
 
     def forward(self, pov, vec, actions, last_hidden=None):
@@ -329,16 +317,23 @@ class MDN_RNN(pl.LightningModule):
         self.log('Training/vec_loss',vec_loss)
 
         return loss
+    
+    def validation_step(self, batch, batch_idx):
+        # perform predictions and compute loss
+        pov_loss, vec_loss = self._step(batch)
+        loss = pov_loss + vec_loss
+        
+        # score and log predictions
+        self.log('Validation/loss', loss,)
+        self.log('Validation/pov_loss',pov_loss)
+        self.log('Validation/vec_loss',vec_loss)
+
+        return loss
         
     def validation_epoch_end(self, batch_losses):
         # check whether to go to next step in curriculum, 
         # but only if latent overshooting is active
-        '''
-        if self.hparams.latent_overshooting:
-            mean_loss = torch.tensor(batch_losses).mean()
-            self._check_curriculum_cond(mean_loss)
-        '''
-        pass
+        self._check_curriculum_cond()
     
     def configure_optimizers(self):
         # set up optimizer
@@ -346,19 +341,19 @@ class MDN_RNN(pl.LightningModule):
         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs, weight_decay=0)
         return optimizer
 
-    def _init_curriculum(self, seq_len=None, curriculum_start=0):
+    def _init_curriculum(self, max_forecast=None, curriculum_start=0):
         self.curriculum_step = 0
-        self.curriculum = [0]
-        '''
-        if seq_len is None:
-            seq_len = self.hparams.seq_len
-        self.curriculum = [i for i in range(seq_len-2)]
+        if max_forecast is None:
+            max_forecast = self.hparams.max_forecast
+        self.curriculum = [i for i in range(max_forecast-2)]
         self.curriculum_step = curriculum_start
-        '''
         
-    def _check_curriculum_cond(self, value):
+    def _check_curriculum_cond(self):
         if self.curriculum_step < len(self.curriculum)-1:
-            if value < self.hparams.curriculum_threshold:
+            # if value < self.hparams.curriculum_threshold:
+                # self.curriculum_step += 1
+                # print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
+            if (self.current_epoch + 1) % 10 == 0:
                 self.curriculum_step += 1
                 print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
         

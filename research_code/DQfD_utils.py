@@ -101,8 +101,10 @@ class CombinedMemory(object):
             self.concat_memo = self.memory_dict[memory_id].memory
 
         elif memory_id == 'agent':
-            print(f"{len(self.memory_dict['expert'].memory) = }")
-            print(f"{len(self.memory_dict['agent'].memory) = }")
+            # print(f"{len(self.memory_dict['expert'].memory) = }")
+            # print(f"{len(self.memory_dict['agent'].memory) = }")
+            # print(f"{len(self.memory_dict['expert'].memory[0]) = }")
+            # print(f"{len(self.memory_dict['agent'].memory[0]) = }")
             self.concat_memo = np.concatenate([self.memory_dict['expert'].memory, self.memory_dict['agent'].memory])
    
     def __getitem__(self, idx):
@@ -222,7 +224,9 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
             pov_obs = einops.rearrange(torch.from_numpy(np.array(list(map(lambda x: x['pov'], obs))).astype(np.float32) / 255), ' t h w c -> t c h w').to(dynamics_model.device)
             vec_obs = torch.from_numpy(np.array(list(map(lambda x: x['vector'], obs))).astype(np.float32)).to(dynamics_model.device)
             torch_actions = torch.from_numpy(centroids[np.array(actions)].astype(np.float32)).to(dynamics_model.device)
-            sample, *_ = dynamics_model.visual_model.encode_only(pov_obs) 
+            sample, *_ = dynamics_model.visual_model.encode_only(pov_obs)
+            if dynamics_model.hparams.visual_model_cls == 'vqvae':
+                sample = einops.rearrange(sample, 'b c d -> b (c d)')
             gru_input = torch.cat([sample, vec_obs, torch_actions], dim=1)[None]
             hidden_states_seq, _ = dynamics_model.gru(gru_input)
             predictive_state = hidden_states_seq[0]
@@ -233,7 +237,6 @@ def load_expert_demo(env_name, data_dir, num_expert_episodes, centroids, combine
         # add episode to memory
         combined_memory.add_episode(obs, actions, rewards, td_errors, predictive_state, memory_id='expert')
         print(f'Reward: {np.sum(rewards)}\n')
-
 
     print('\nLoaded ',len(combined_memory.memory_dict['expert']),' expert samples!')
 

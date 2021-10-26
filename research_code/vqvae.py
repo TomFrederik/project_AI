@@ -57,7 +57,7 @@ class SeparateQuantizer(nn.Module):
         qy = F.softmax(logits, dim=2)
         diff = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=2).mean()
 
-        ind = soft_one_hot.argmax(dim=1)
+        ind = soft_one_hot.argmax(dim=2)
         return z_q, diff, ind, logits
 
     def embed_one_hot(self, embed_vec):

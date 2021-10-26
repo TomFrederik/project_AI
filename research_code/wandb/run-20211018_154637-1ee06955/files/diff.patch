@@ -1,0 +1,55 @@
+diff --git a/research_code/datasets.py b/research_code/datasets.py
+index 1349001..b3dd24a 100755
+--- a/research_code/datasets.py
++++ b/research_code/datasets.py
+@@ -254,6 +254,7 @@ class TrajectoryIterData(IterableDataset):
+         self.names = self.pipeline.get_trajectory_names()
+         self.names.sort()
+         
++        # there is something off with these trajectories -> extremely large spike in TD-error
+         blacklist = [
+             'v3_right_basil_dragon-15_4328-4804',
+             'v3_kindly_lemon_mummy-2_59830-60262',
+diff --git a/research_code/train_DynamicsModel.py b/research_code/train_DynamicsModel.py
+index 5d3569f..e0f6421 100755
+--- a/research_code/train_DynamicsModel.py
++++ b/research_code/train_DynamicsModel.py
+@@ -38,11 +38,11 @@ class PredictionCallback(pl.Callback):
+ 
+         if isinstance(dataset, datasets.DynamicsData):
+             iterator = iter(dataset)
+-            for _ in range(2000):
++            for _ in range(1000):
+                 b = next(iterator)
+             pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iterator)[:-1])
+         elif isinstance(dataset, datasets.TrajectoryData):
+-            pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[3][:3])
++            pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[10][:3])
+         else:
+             raise NotImplementedError
+ 
+diff --git a/research_code/vqvae_sweep.sh b/research_code/vqvae_sweep.sh
+index 889f0f4..51c0bce 100644
+--- a/research_code/vqvae_sweep.sh
++++ b/research_code/vqvae_sweep.sh
+@@ -2,10 +2,7 @@
+ LOGDIR="/home/lieberummaas/datadisk/minerl/experiment_logs"
+ NUM_EPOCHS=1
+ 
+-echo "Now training with 16 embeddings, 128 num_variables, 64 embedding_dim"
+-python vqvae.py --num_epochs 1 --log_dir $LOGDIR --num_embeddings 16 --num_variables 128 --embedding_dim 64 #--suffix $(printf $num_embeddings)
+-
+-for num_embeddings in 32 64 128
++for num_embeddings in 16 32 64 128
+     do
+         for num_variables in 16 32 64 128
+             do
+diff --git a/research_code/wandb/latest-run b/research_code/wandb/latest-run
+index d5a281c..7a7eacc 120000
+--- a/research_code/wandb/latest-run
++++ b/research_code/wandb/latest-run
+@@ -1 +1 @@
+-run-20211018_092139-gm0lvmsh
+\ No newline at end of file
++run-20211018_154637-1ee06955
+\ No newline at end of file

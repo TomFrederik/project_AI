@@ -1,0 +1,126 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.12.4
+    code_path: code/research_code/train_DynamicsModel.py
+    framework: lightning
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    m:
+    - 1: trainer/global_step
+      6:
+      - 3
+    - 1: Predictions (raw | base reconstruction | one-step | n-step)._type
+      5: 1
+      6:
+      - 1
+    - 1: Predictions (raw | base reconstruction | one-step | n-step).path
+      5: 1
+      6:
+      - 1
+    - 1: Predictions (raw | base reconstruction | one-step | n-step).sha256
+      5: 1
+      6:
+      - 1
+    - 1: Predictions (raw | base reconstruction | one-step | n-step).size
+      5: 1
+      6:
+      - 1
+    - 1: Predictions (raw | base reconstruction | one-step | n-step).format
+      5: 1
+      6:
+      - 1
+    - 1: Predictions (raw | base reconstruction | one-step | n-step).width
+      5: 1
+      6:
+      - 1
+    - 1: Predictions (raw | base reconstruction | one-step | n-step).height
+      5: 1
+      6:
+      - 1
+    - 1: Training/loss
+      5: 1
+      6:
+      - 1
+    - 1: Training/pov_loss
+      5: 1
+      6:
+      - 1
+    - 1: Training/vec_loss
+      5: 1
+      6:
+      - 1
+    - 1: epoch
+      5: 1
+      6:
+      - 1
+    - 1: Validation/loss
+      5: 1
+      6:
+      - 1
+    - 1: Validation/pov_loss
+      5: 1
+      6:
+      - 1
+    - 1: Validation/vec_loss
+      5: 1
+      6:
+      - 1
+    python_version: 3.9.6
+    start_time: 1634649178
+    t:
+      1:
+      - 1
+      - 9
+      2:
+      - 1
+      - 9
+      3:
+      - 7
+      - 15
+      - 16
+      4: 3.9.6
+      5: 0.12.4
+      8:
+      - 5
+curriculum_start:
+  desc: null
+  value: 0
+dynamics_model:
+  desc: null
+  value: MDN_RNN
+env_name:
+  desc: null
+  value: MineRLNavigateDenseVectorObf-v0
+gru_hidden_size:
+  desc: null
+  value: 512
+gru_kwargs/hidden_size:
+  desc: null
+  value: 512
+gru_kwargs/num_layers:
+  desc: null
+  value: 1
+max_forecast:
+  desc: null
+  value: 10
+num_components:
+  desc: null
+  value: 5
+optim_kwargs/lr:
+  desc: null
+  value: 0.0003
+use_one_hot:
+  desc: null
+  value: false
+use_whole_trajectories:
+  desc: null
+  value: true
+visual_model_cls:
+  desc: null
+  value: vqvae
+visual_model_path:
+  desc: null
+  value: /home/lieberummaas/datadisk/minerl/experiment_logs/VisualModel/2p1s1xsz/checkpoints/last.ckpt

@@ -1,0 +1,516 @@
+diff --git a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/0.mp4 b/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/0.mp4
+deleted file mode 100644
+index 99a1a2c..0000000
+Binary files a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/0.mp4 and /dev/null differ
+diff --git a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/1.mp4 b/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/1.mp4
+deleted file mode 100644
+index ea5534c..0000000
+Binary files a/pretrain_videos/MineRLNavigateDenseVectorObf-v0/VQVAE/1633011714.0366895/1.mp4 and /dev/null differ
+diff --git a/research_code/DQfD_models.py b/research_code/DQfD_models.py
+index e3f4d54..4459739 100644
+--- a/research_code/DQfD_models.py
++++ b/research_code/DQfD_models.py
+@@ -88,6 +88,7 @@ class QNetwork(pl.LightningModule):
+             print('\nInitialized new ConvFeatureExtractor')
+         else:
+             raise ValueError(f'Unrecognized feature extractor class {visual_model_cls}')
++        self.visual_model.eval()
+         
+         # set up dynamics model
+         if dynamics_model_path is not None and dynamics_model_cls is not None:
+@@ -201,9 +202,52 @@ class QNetwork(pl.LightningModule):
+     
+         n_step_rewards = F.conv1d(rewards[None,None,:], discount_array[None,None,:], padding=self.hparams.horizon)[0,0,:-1]
+         n_step_rewards = n_step_rewards[self.hparams.horizon:]
++
+         return n_step_rewards
+ 
+     def training_step(self, batch, batch_idx):
++        one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs = self.step(batch)
++
++        # logging
++        log_dict = {
++            'Training/1-step TD Error': one_step_loss,
++            'Training/ClassificationLoss': classification_loss,
++            'Training/n-step TD Error': n_step_loss,
++            'Training/Loss': loss,
++            'Training/ExpertAgentAgreement': expert_agent_agreement,
++            'Training/ExpertQValues': expert_q_values,
++            'Training/OtherQValues': other_q_values,
++            'Training/Actions': wandb.Histogram(action_idcs.detach().cpu())
++        }
++        self.logger.experiment.log(log_dict)
++
++        return loss
++
++    def validation_step(self, batch, batch_idx):
++        one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs = self.step(batch)
++
++        # logging
++        log_dict = {
++            'Validation/1-step TD Error': one_step_loss,
++            'Validation/ClassificationLoss': classification_loss,
++            'Validation/n-step TD Error': n_step_loss,
++            'Validation/Loss': loss,
++            'Validation/ExpertAgentAgreement': expert_agent_agreement,
++            'Validation/ExpertQValues': expert_q_values,
++            'Validation/OtherQValues': other_q_values,
++            'Validation/Actions': wandb.Histogram(action_idcs.detach().cpu())
++        }
++        return log_dict
++
++    def validation_epoch_end(self, outputs):
++        log_dict = {}
++        for key in outputs[0].keys():
++            mean_metric = torch.stack([x[key] for x in outputs], dim=0).mean()
++            log_dict[key] = mean_metric
++        self.logger.experiment.log(log_dict)
++
++
++    def step(self, batch): 
+         pov_obs, vec_obs, actions, action_idcs, rewards = map(lambda x: x[0], batch) # remove first dimension
+         
+         # compute n-step rewards
+@@ -246,7 +290,6 @@ class QNetwork(pl.LightningModule):
+ 
+         # compute the individual losses
+         idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
+-        print(q_values[idcs, action_idcs])
+         classification_loss = self._large_margin_classification_loss(q_values, action_idcs).mean()
+         one_step_loss = (q_values[idcs, action_idcs] - rewards - self.hparams.discount_factor * torch.cat([target_next_q_values[idcs[:-1], next_action], torch.zeros_like(rewards)[:1]], dim=0)).pow(2).mean()
+         n_step_loss = (q_values[idcs, action_idcs] - n_step_rewards - (self.hparams.discount_factor ** self.hparams.horizon) * torch.cat([target_n_step_q_values[idcs[:-self.hparams.horizon], n_step_action], torch.zeros_like(n_step_rewards)[:self.hparams.horizon]],dim=0)).pow(2).mean()
+@@ -263,22 +306,10 @@ class QNetwork(pl.LightningModule):
+         other_q_values[idcs, action_idcs] = 0
+         other_q_values = other_q_values.mean()
+         ##
+-        
+-        # logging
+-        log_dict = {
+-            'Training/1-step TD Error': one_step_loss,
+-            'Training/ClassificationLoss': classification_loss,
+-            'Training/n-step TD Error': n_step_loss,
+-            'Training/Loss': loss,
+-            'Training/ExpertAgentAgreement': expert_agent_agreement,
+-            'Training/ExpertQValues': expert_q_values,
+-            'Training/OtherQValues': other_q_values,
+-            'Training/Actions': wandb.Histogram(action_idcs.detach().cpu())
+-        }
+-        self.logger.experiment.log(log_dict)
+ 
+-        return loss
+-    
++        return one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs.detach().cpu()
++
++
+     def on_after_backward(self):
+         if (self.global_step + 1) % self.hparams.target_update_rate == 0:
+             print(f'\nGlobal step {self.global_step+1}: Updating Target Network\n')
+diff --git a/research_code/DQfD_pretrain.py b/research_code/DQfD_pretrain.py
+index 233d95a..f710504 100644
+--- a/research_code/DQfD_pretrain.py
++++ b/research_code/DQfD_pretrain.py
+@@ -112,8 +112,10 @@ def main(
+     model = QNetwork(**model_kwargs)
+     
+     # load data
+-    train_data = datasets.TrajectoryIterData(env_name, data_dir, num_expert_episodes, centroids, num_workers=num_workers)
++    data = datasets.TrajectoryData(env_name, data_dir, num_expert_episodes, centroids)
++    train_data, val_data = torch.utils.data.random_split(data, [int(len(data)*0.9), len(data) - int(len(data)*0.9)])
+     train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
++    val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+     
+     # set up trainer
+     model_checkpoint = ModelCheckpoint(mode="min", monitor='Training/Loss', save_last=True, every_n_train_steps=500)
+@@ -129,7 +131,7 @@ def main(
+     )
+ 
+     # train
+-    trainer.fit(model, train_loader)
++    trainer.fit(model, train_loader, val_loader)
+ 
+ 
+ if __name__ == '__main__':
+@@ -138,10 +140,10 @@ if __name__ == '__main__':
+     parser.add_argument('--data_dir', default='/home/lieberummaas/datadisk/minerl/data')
+     parser.add_argument('--log_dir', default='/home/lieberummaas/datadisk/minerl/run_logs')
+     parser.add_argument('--centroids_path', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
+-    parser.add_argument('--num_centroids', type=int, default=150)
++    parser.add_argument('--num_centroids', type=int, default=1000)
+     
+     # training args
+-    parser.add_argument('--epochs', default=10, type=int)
++    parser.add_argument('--epochs', default=100, type=int)
+     parser.add_argument('--num_expert_episodes', default=300, type=int)
+     parser.add_argument('--target_update_rate', default=100, type=int, help='How often to update target network')
+     parser.add_argument('--batch_size', default=1, type=int)
+@@ -152,18 +154,18 @@ if __name__ == '__main__':
+     # Q-learning args
+     parser.add_argument('--discount_factor', default=0.99, type=float)
+     parser.add_argument('--margin', default=0.8, type=float)
+-    parser.add_argument('--horizon', default=10, type=int, help='Horizon for n-step TD error')
++    parser.add_argument('--horizon', default=50, type=int, help='Horizon for n-step TD error')
+     parser.add_argument('--use_one_hot', action='store_true', help='whether to use one-hot representation')
+     
+     # feature extractor args
+     parser.add_argument('--visual_model_cls', choices=['vqvae', 'vae', 'conv'], default='vae', help='Class of the visual_model model')
+     parser.add_argument('--visual_model_path', help='Path to visual_model model')
+-    parser.add_argument('--unfreeze_visual_model', action='store_true', help='Whether to freeze or finetune the feature extractor')
++    parser.add_argument('--unfreeze_visual_model', action='store_true', help='Whether to freeze/finetune the visual mode')
+     
+     # dynamics model args
+     parser.add_argument('--dynamics_model_cls', choices=['mdn', None], default=None, help='Class of the dynamics model')
+     parser.add_argument('--dynamics_model_path', default=None, help='Path to dynamics model')
+-    parser.add_argument('--unfreeze_dynamics_model', action='store_true', help='Whether to freeze or finetune the dynamics model extractor')
++    parser.add_argument('--unfreeze_dynamics_model', action='store_true', help='Whether to freeze/finetune the dynamics model')
+     
+     
+     args = parser.parse_args()
+diff --git a/research_code/datasets.py b/research_code/datasets.py
+index 1349001..89936ac 100755
+--- a/research_code/datasets.py
++++ b/research_code/datasets.py
+@@ -254,6 +254,7 @@ class TrajectoryIterData(IterableDataset):
+         self.names = self.pipeline.get_trajectory_names()
+         self.names.sort()
+         
++        # there is something off with these trajectories -> extremely large spike in TD-error
+         blacklist = [
+             'v3_right_basil_dragon-15_4328-4804',
+             'v3_kindly_lemon_mummy-2_59830-60262',
+@@ -288,8 +289,8 @@ class TrajectoryIterData(IterableDataset):
+         rewards = np.array(rewards).astype(np.float32)
+         
+         # EXPERIMENTAL
+-        print('Warning, setting last reward to 0')
+-        rewards[-1] = 0
++        # print('Warning, setting last reward to 1')
++        # rewards[-1] = 1
+         
+         if self.centroids is not None:
+             # compute action idcs
+diff --git a/research_code/dynamics_models.py b/research_code/dynamics_models.py
+index 092456e..267ebe6 100755
+--- a/research_code/dynamics_models.py
++++ b/research_code/dynamics_models.py
+@@ -1,32 +1,22 @@
++from time import time
++
++import einops
++import matplotlib.pyplot as plt
++import numpy as np
++import pytorch_lightning as pl
+ import torch
+ import torch.nn as nn
+-import pytorch_lightning as pl
+-import numpy as np
+-import matplotlib.pyplot as plt
+ import torchdiffeq as teq
+-import einops
+ 
+ from vae_model import VAE
+ from vqvae import VQVAE
+-#from reward_model import RewardMLP
+ 
+-from time import time
+ 
+ visual_model_by_str = {
+     'vae':VAE,
+     'vqvae':VQVAE
+ }
+ 
+-class MDNRNNReward(nn.Module):
+-    def __init__(self, mdn_path, reward_path):
+-        super().__init__()
+-        self.mdn = MDN_RNN.load_from_checkpoint(mdn_path)
+-        self.reward_model = RewardMLP.load_from_checkpoint(reward_path)
+-    
+-    def forward(self, state, action, h_n, c_n, batched=True):
+-        _, state, (h_n, c_n), _, _ = self.mdn.forward_latent(state, action, h_n, c_n, batched)
+-        rew = self.reward_model(state[...,-64:])
+-        return state, rew, (h_n, c_n)
+         
+ class MDN_RNN(pl.LightningModule):
+     def __init__(
+@@ -37,8 +27,9 @@ class MDN_RNN(pl.LightningModule):
+         num_components=5, 
+         visual_model_path='', 
+         visual_model_cls='vae', 
+-        curriculum_threshold=3.0, 
++        # curriculum_threshold=3.0, 
+         curriculum_start=0, 
++        max_forecast=10,
+         use_one_hot=False
+     ):
+         super().__init__()
+@@ -80,11 +71,9 @@ class MDN_RNN(pl.LightningModule):
+                 nn.Linear(gru_kwargs['hidden_size'], num_components + num_components * 2 * self.latent_dim + 64)
+             )
+         
+-        self.ce_loss = nn.CrossEntropyLoss()
+-
+     def _step(self, batch):
+         # unpack batch
+-        pov, vec, actions, _ = batch
++        pov, vec, actions, *_ = batch
+ 
+         # make predictions
+         if self.hparams.visual_model_cls == 'vqvae':
+@@ -149,7 +138,6 @@ class MDN_RNN(pl.LightningModule):
+         return einops.rearrange(sample, 'b n d -> b (n d)')
+ 
+ 
+-
+     def forward(self, pov, vec, actions, last_hidden=None):
+         '''
+         Given a sequence of pov, vec and actions, computes priors over next latent
+@@ -329,16 +317,23 @@ class MDN_RNN(pl.LightningModule):
+         self.log('Training/vec_loss',vec_loss)
+ 
+         return loss
++    
++    def validation_step(self, batch, batch_idx):
++        # perform predictions and compute loss
++        pov_loss, vec_loss = self._step(batch)
++        loss = pov_loss + vec_loss
++        
++        # score and log predictions
++        self.log('Validation/loss', loss,)
++        self.log('Validation/pov_loss',pov_loss)
++        self.log('Validation/vec_loss',vec_loss)
++
++        return loss
+         
+     def validation_epoch_end(self, batch_losses):
+         # check whether to go to next step in curriculum, 
+         # but only if latent overshooting is active
+-        '''
+-        if self.hparams.latent_overshooting:
+-            mean_loss = torch.tensor(batch_losses).mean()
+-            self._check_curriculum_cond(mean_loss)
+-        '''
+-        pass
++        self._check_curriculum_cond()
+     
+     def configure_optimizers(self):
+         # set up optimizer
+@@ -346,19 +341,19 @@ class MDN_RNN(pl.LightningModule):
+         optimizer = torch.optim.AdamW(params, **self.hparams.optim_kwargs, weight_decay=0)
+         return optimizer
+ 
+-    def _init_curriculum(self, seq_len=None, curriculum_start=0):
++    def _init_curriculum(self, max_forecast=None, curriculum_start=0):
+         self.curriculum_step = 0
+-        self.curriculum = [0]
+-        '''
+-        if seq_len is None:
+-            seq_len = self.hparams.seq_len
+-        self.curriculum = [i for i in range(seq_len-2)]
++        if max_forecast is None:
++            max_forecast = self.hparams.max_forecast
++        self.curriculum = [i for i in range(max_forecast-2)]
+         self.curriculum_step = curriculum_start
+-        '''
+         
+-    def _check_curriculum_cond(self, value):
++    def _check_curriculum_cond(self):
+         if self.curriculum_step < len(self.curriculum)-1:
+-            if value < self.hparams.curriculum_threshold:
++            # if value < self.hparams.curriculum_threshold:
++                # self.curriculum_step += 1
++                # print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
++            if (self.current_epoch + 1) % 10 == 0:
+                 self.curriculum_step += 1
+                 print(f'\nCurriculum updated! New forecast horizon is {self.curriculum[self.curriculum_step]}\n')
+         
+diff --git a/research_code/eval_pretrained_dqfd.py b/research_code/eval_pretrained_dqfd.py
+index 108fdb0..b87f8b9 100644
+--- a/research_code/eval_pretrained_dqfd.py
++++ b/research_code/eval_pretrained_dqfd.py
+@@ -1,19 +1,20 @@
+ import argparse
+-import torch
+-import gym
+ import os
+ import random
++from time import time
++
++import cv2
+ import einops 
++import gym
+ import numpy as np
+-import cv2
+-from time import time
++import torch
+ 
+-from PretrainDQN import QNetwork
++from DQfD_models import QNetwork
+ 
+ def main(
+     env_name,
+-    log_dir,
+-    data_dir,
++    centroids_dir,
++    num_centroids,
+     num_episodes,
+     max_episode_len,
+     model_path,
+@@ -26,13 +27,13 @@ def main(
+     q_net.eval()
+ 
+     # set run id
+-    video_dir = os.path.join(video_dir, env_name, q_net.feature_extractor.__class__.__name__, str(int(time())))
++    video_dir = os.path.join(video_dir, env_name, q_net.visual_model.__class__.__name__, str(int(time())))
+ 
+     # check that video_dir exists
+     os.makedirs(video_dir, exist_ok=True)
+     
+     # load clusters
+-    clusters = np.load(os.path.join(data_dir, env_name + "_150_centroids.npy"))
++    clusters = np.load(os.path.join(centroids_dir, env_name + f"_{num_centroids}_centroids.npy"))
+ 
+     # init env
+     env = gym.make(env_name)
+@@ -91,8 +92,8 @@ def main(
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--env_name', type=str, default='MineRLNavigateDenseVectorObf-v0')
+-    parser.add_argument('--log_dir', type=str, default='/home/lieberummaas/datadisk/minerl/run_logs/')
+-    parser.add_argument('--data_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
++    parser.add_argument('--centroids_dir', type=str, default='/home/lieberummaas/datadisk/minerl/data/')
++    parser.add_argument('--num_centroids', type=int, default=150)
+     parser.add_argument('--num_episodes', type=int, default=2)
+     parser.add_argument('--max_episode_len', type=int, default=2000)
+     parser.add_argument('--model_path', type=str, required=True)
+diff --git a/research_code/train_DynamicsModel.py b/research_code/train_DynamicsModel.py
+index 5d3569f..e23e1cc 100755
+--- a/research_code/train_DynamicsModel.py
++++ b/research_code/train_DynamicsModel.py
+@@ -38,11 +38,11 @@ class PredictionCallback(pl.Callback):
+ 
+         if isinstance(dataset, datasets.DynamicsData):
+             iterator = iter(dataset)
+-            for _ in range(2000):
++            for _ in range(1000):
+                 b = next(iterator)
+             pov, vec_obs, act = map(lambda x: x[None,:seq_len], next(iterator)[:-1])
+         elif isinstance(dataset, datasets.TrajectoryData):
+-            pov, vec_obs, act = map(lambda x: x[None,:seq_len], dataset[3][:3])
++            pov, vec_obs, act = map(lambda x: x[None,100:100+seq_len], dataset[10][:3])
+         else:
+             raise NotImplementedError
+ 
+@@ -141,10 +141,11 @@ def train_DynamicsModel(
+     gru_hidden_size,
+     load_from_checkpoint, 
+     checkpoint_path,
+-    curriculum_threshold, 
+     curriculum_start,
+     save_freq,
+-    use_one_hot
++    use_one_hot,
++    num_centroids,
++    num_workers
+ ):
+     
+     pl.seed_everything(1337)
+@@ -166,7 +167,6 @@ def train_DynamicsModel(
+         'optim_kwargs':optim_kwargs,
+         'visual_model_cls':visual_model_cls,
+         'num_components':num_components,
+-        'curriculum_threshold':curriculum_threshold,
+         'curriculum_start':curriculum_start,
+         'use_one_hot':use_one_hot
+     }
+@@ -180,20 +180,26 @@ def train_DynamicsModel(
+         model = MDN_RNN(**model_kwargs)
+ 
+     # load data
++    print(f'\nUsing {num_centroids} action centroids!')
++    centroids = np.load(os.path.join(data_dir, env_name + f'_{num_centroids}_centroids.npy'))
+     if use_whole_trajectories:
+-        train_data = datasets.TrajectoryData(env_name, data_dir)
++        data = datasets.TrajectoryData(env_name, data_dir, centroids=centroids)
+     else:
+         raise NotImplementedError("If you want to use this, make sure to only train on action centroids")
+         #train_data = datasets.DynamicsData(env_name, data_dir, seq_len, batch_size)
+     
+-    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=1, pin_memory=True)
+-
+-    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+     prediction_callback = PredictionCallback(
+         every_n_batches=save_freq,
+-        dataset=train_data,
+-        seq_len=10
++        dataset=data,
++        seq_len=50
+     )
++    
++
++    train_data, val_data = torch.utils.data.random_split(data, [int(len(data)*0.9), len(data)-int(len(data)*0.9)])
++    train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
++    val_loader = DataLoader(val_data, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
++
++    model_checkpoint = ModelCheckpoint(mode="min", monitor=monitor, save_last=True, every_n_train_steps=save_freq)
+     callbacks = [model_checkpoint, prediction_callback]
+     config = dict(
+         env_name=env_name,
+@@ -213,7 +219,7 @@ def train_DynamicsModel(
+         default_root_dir=log_dir,
+         max_epochs=num_epochs,
+     )
+-    trainer.fit(model, train_loader)
++    trainer.fit(model, train_loader, val_loader)
+ 
+ if __name__=='__main__':
+     parser = argparse.ArgumentParser()
+@@ -231,10 +237,11 @@ if __name__=='__main__':
+     parser.add_argument('--lr', default=3e-4, type=float, help='Learning rate')
+     parser.add_argument('--load_from_checkpoint', action='store_true')
+     parser.add_argument('--checkpoint_path', default=None, type=str)
++    parser.add_argument('--num_centroids', default=1000, type=int)
++    parser.add_argument('--num_workers', default=6, type=int)
+     
+     # sequence learning args
+     # parser.add_argument('--latent_overshooting', action='store_true')
+-    parser.add_argument('--curriculum_threshold', default=3, type=float)
+     parser.add_argument('--curriculum_start', default=0, type=int)
+ 
+     # visual model args
+diff --git a/research_code/vqvae.py b/research_code/vqvae.py
+index 9d4b339..dbd0408 100644
+--- a/research_code/vqvae.py
++++ b/research_code/vqvae.py
+@@ -57,7 +57,7 @@ class SeparateQuantizer(nn.Module):
+         qy = F.softmax(logits, dim=2)
+         diff = self.kld_scale * torch.sum(qy * torch.log(qy * self.codebook_size + 1e-10), dim=2).mean()
+ 
+-        ind = soft_one_hot.argmax(dim=1)
++        ind = soft_one_hot.argmax(dim=2)
+         return z_q, diff, ind, logits
+ 
+     def embed_one_hot(self, embed_vec):
+diff --git a/research_code/vqvae_sweep.sh b/research_code/vqvae_sweep.sh
+index 889f0f4..51c0bce 100644
+--- a/research_code/vqvae_sweep.sh
++++ b/research_code/vqvae_sweep.sh
+@@ -2,10 +2,7 @@
+ LOGDIR="/home/lieberummaas/datadisk/minerl/experiment_logs"
+ NUM_EPOCHS=1
+ 
+-echo "Now training with 16 embeddings, 128 num_variables, 64 embedding_dim"
+-python vqvae.py --num_epochs 1 --log_dir $LOGDIR --num_embeddings 16 --num_variables 128 --embedding_dim 64 #--suffix $(printf $num_embeddings)
+-
+-for num_embeddings in 32 64 128
++for num_embeddings in 16 32 64 128
+     do
+         for num_variables in 16 32 64 128
+             do
+diff --git a/research_code/wandb/latest-run b/research_code/wandb/latest-run
+index d5a281c..65b0510 120000
+--- a/research_code/wandb/latest-run
++++ b/research_code/wandb/latest-run
+@@ -1 +1 @@
+-run-20211018_092139-gm0lvmsh
+\ No newline at end of file
++run-20211019_205430-1ewg6q3f
+\ No newline at end of file

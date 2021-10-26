@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 import einops
+from einops.layers.torch import Rearrange
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -30,21 +31,24 @@ class ResBlock(nn.Module):
         return out
 
 class ConvFeatureExtractor(nn.Module):
-    def __init__(self, n_hid=86, latent_dim=64):
+    def __init__(self, input_channels=3, n_hid=64, latent_dim=1024):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(3, n_hid, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(n_hid, 2*n_hid, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(2*n_hid, 2*n_hid, 3, padding=1),
-            nn.ReLU(inplace=True),
-            ResBlock(2*n_hid, 2*n_hid//4),
-            ResBlock(2*n_hid, 2*n_hid//4)
+
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 32, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, 4, 2),
+            nn.ReLU(),
+            Rearrange('b c h w -> b (c h w)'),
+            nn.Linear(1024, latent_dim)
         )
-        
+
     def forward(self, x):
-        return self.conv(x)
+        return self.net(x)
     
     @torch.no_grad()
     def encode_only(self, x):
@@ -55,7 +59,7 @@ class ConvFeatureExtractor(nn.Module):
     
     @property
     def device(self):
-        return list(self.conv.parameters())[0].device
+        return list(self.net.parameters())[0].device
 
 class QNetwork(pl.LightningModule):
     
@@ -83,6 +87,7 @@ class QNetwork(pl.LightningModule):
         if visual_model_cls in [VQVAE, VAE]:
             self.visual_model = visual_model_cls.load_from_checkpoint(visual_model_path)
             print(f'\nLoaded {visual_model_cls.__name__} from {visual_model_path}!')
+            self.visual_model.eval()
         elif visual_model_cls == ConvFeatureExtractor:
             self.visual_model = visual_model_cls(**visual_model_kwargs)
             print('\nInitialized new ConvFeatureExtractor')
@@ -201,9 +206,52 @@ class QNetwork(pl.LightningModule):
     
         n_step_rewards = F.conv1d(rewards[None,None,:], discount_array[None,None,:], padding=self.hparams.horizon)[0,0,:-1]
         n_step_rewards = n_step_rewards[self.hparams.horizon:]
+
         return n_step_rewards
 
     def training_step(self, batch, batch_idx):
+        one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs = self.step(batch)
+
+        # logging
+        log_dict = {
+            'Training/1-step TD Error': one_step_loss,
+            'Training/ClassificationLoss': classification_loss,
+            'Training/n-step TD Error': n_step_loss,
+            'Training/Loss': loss,
+            'Training/ExpertAgentAgreement': expert_agent_agreement,
+            'Training/ExpertQValues': expert_q_values,
+            'Training/OtherQValues': other_q_values,
+            'Training/Actions': wandb.Histogram(action_idcs.detach().cpu())
+        }
+        self.logger.experiment.log(log_dict)
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs = self.step(batch)
+
+        # logging
+        log_dict = {
+            'Validation/1-step TD Error': one_step_loss,
+            'Validation/ClassificationLoss': classification_loss,
+            'Validation/n-step TD Error': n_step_loss,
+            'Validation/Loss': loss,
+            'Validation/ExpertAgentAgreement': expert_agent_agreement,
+            'Validation/ExpertQValues': expert_q_values,
+            'Validation/OtherQValues': other_q_values,
+            #'Validation/Actions': wandb.Histogram(action_idcs.detach().cpu())
+        }
+        return log_dict
+
+    def validation_epoch_end(self, outputs):
+        log_dict = {}
+        for key in outputs[0].keys():
+            mean_metric = torch.stack([x[key] for x in outputs], dim=0).mean()
+            log_dict[key] = mean_metric
+        self.logger.experiment.log(log_dict)
+
+
+    def step(self, batch): 
         pov_obs, vec_obs, actions, action_idcs, rewards = map(lambda x: x[0], batch) # remove first dimension
         
         # compute n-step rewards
@@ -246,7 +294,6 @@ class QNetwork(pl.LightningModule):
 
         # compute the individual losses
         idcs = torch.arange(0, len(q_values), dtype=torch.long, requires_grad=False)
-        print(q_values[idcs, action_idcs])
         classification_loss = self._large_margin_classification_loss(q_values, action_idcs).mean()
         one_step_loss = (q_values[idcs, action_idcs] - rewards - self.hparams.discount_factor * torch.cat([target_next_q_values[idcs[:-1], next_action], torch.zeros_like(rewards)[:1]], dim=0)).pow(2).mean()
         n_step_loss = (q_values[idcs, action_idcs] - n_step_rewards - (self.hparams.discount_factor ** self.hparams.horizon) * torch.cat([target_n_step_q_values[idcs[:-self.hparams.horizon], n_step_action], torch.zeros_like(n_step_rewards)[:self.hparams.horizon]],dim=0)).pow(2).mean()
@@ -263,22 +310,10 @@ class QNetwork(pl.LightningModule):
         other_q_values[idcs, action_idcs] = 0
         other_q_values = other_q_values.mean()
         ##
-        
-        # logging
-        log_dict = {
-            'Training/1-step TD Error': one_step_loss,
-            'Training/ClassificationLoss': classification_loss,
-            'Training/n-step TD Error': n_step_loss,
-            'Training/Loss': loss,
-            'Training/ExpertAgentAgreement': expert_agent_agreement,
-            'Training/ExpertQValues': expert_q_values,
-            'Training/OtherQValues': other_q_values,
-            'Training/Actions': wandb.Histogram(action_idcs.detach().cpu())
-        }
-        self.logger.experiment.log(log_dict)
 
-        return loss
-    
+        return one_step_loss, classification_loss, n_step_loss, loss, expert_agent_agreement, expert_q_values, other_q_values, action_idcs.detach().cpu()
+
+
     def on_after_backward(self):
         if (self.global_step + 1) % self.hparams.target_update_rate == 0:
             print(f'\nGlobal step {self.global_step+1}: Updating Target Network\n')

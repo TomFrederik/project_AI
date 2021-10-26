@@ -155,33 +155,11 @@ class VAEEncoder(nn.Module):
             Rearrange('b c h w -> b (c h w)'),
             nn.Linear(1024, 2*latent_dim)
         )
-        '''
-        self.net = nn.Sequential(
-            nn.Conv2d(input_channels, n_hid, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(n_hid, 2*n_hid, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(2*n_hid, 2*n_hid, 3, padding=1),
-            nn.ReLU(),
-            ResBlock(2*n_hid, 2*n_hid//4),
-            ResBlock(2*n_hid, 2*n_hid//4), # --> shape is (...., 16, 16)
-            nn.ReLU(),
-            nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(2*n_hid, 2*n_hid, 3, stride=2, padding=1), # (.... 4, 4)
-            nn.ReLU(),
-            Rearrange('b c h w -> b (c h w)'),
-            nn.Linear(2*n_hid*16, 2*latent_dim)
-        )'''
 
     def forward(self, x):
-        #out = self.net(x)
-        #print('\nEncoder:')
         out = x
         for m in self.net:
-        #    print(out.shape)
             out = m(out)
-        #print(out.shape)
         mean, log_std = torch.chunk(out, chunks=2, dim=-1)        
         return mean, log_std
 
@@ -191,24 +169,6 @@ class VAEDecoder(nn.Module):
     def __init__(self, latent_dim=64, n_init=64, n_hid=64, output_channels=3):
         super().__init__()
 
-        '''
-        self.net = nn.Sequential(
-            Rearrange('b (h w c) -> b c h w', w=4, h=4),
-            nn.Conv2d(64, n_init, 3, padding=1),
-            nn.UpsamplingNearest2d((8,8)),
-            nn.ReLU(),
-            nn.Conv2d(n_init, n_init, 3, padding=1),
-            nn.UpsamplingNearest2d((16,16)),
-            nn.ReLU(),
-            nn.Conv2d(n_init, 2*n_hid, 3, padding=1),
-            nn.ReLU(),
-            ResBlock(2*n_hid, 2*n_hid//4),
-            ResBlock(2*n_hid, 2*n_hid//4),
-            nn.ConvTranspose2d(2*n_hid, n_hid, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(n_hid, output_channels, 4, stride=2, padding=1),
-        )
-        '''
         self.net = nn.Sequential(
             nn.Linear(latent_dim, 1024),
             Rearrange('b d -> b d 1 1'),
@@ -218,17 +178,12 @@ class VAEDecoder(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(64, 32, 6, 2),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 3, 6, 2),
-            #nn.Sigmoid(),
+            nn.ConvTranspose2d(32, 3, 6, 2)
         )
         
 
     def forward(self, x):
-        #print('\nDecoder:')
         out = x
         for m in self.net:
-        #    print(out.shape)
             out = m(out)
-        #print(out.shape)
         return out
-        #return self.net(x)
